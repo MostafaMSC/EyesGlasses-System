@@ -1,12 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { products as demoProducts, type Category, type Product } from "@/data/products";
+import { type Category, type Product } from "@/data/products";
 import { useProductStore } from "@/lib/productStore";
 
 export type SortOption = "popular" | "price_asc" | "price_desc" | "newest";
 
-const DEMO_PRICE_CEILING = Math.ceil(Math.max(...demoProducts.map((p) => p.price)) / 10000) * 10000;
+// Floor for the price slider so it isn't stuck at 0 before any real product
+// (demo or admin-added) exists.
+const DEFAULT_PRICE_CEILING = 500000;
 
 export function useProductFilters(initial?: { category?: Category | "all" }) {
   const { products: allProducts } = useProductStore();
@@ -15,7 +17,7 @@ export function useProductFilters(initial?: { category?: Category | "all" }) {
     [allProducts]
   );
   const PRICE_CEILING = useMemo(
-    () => Math.max(DEMO_PRICE_CEILING, ...allProducts.map((p) => p.price)),
+    () => Math.max(DEFAULT_PRICE_CEILING, ...allProducts.map((p) => p.price)),
     [allProducts]
   );
   const [search, setSearch] = useState("");
