@@ -68,7 +68,7 @@ export default function TryOnDebugPage() {
   const [yawDeg, setYawDeg] = useState(0);
   const [rollDeg, setRollDeg] = useState(0);
   const [headHalfWidthPx, setHeadHalfWidthPx] = useState(110);
-  const [productId, setProductId] = useState(products[0].id);
+  const [productId, setProductId] = useState(products[0]?.id ?? "");
   const [showIris, setShowIris] = useState(true);
 
   // Falls back if the selected product was deleted from the admin panel.
@@ -99,7 +99,7 @@ export default function TryOnDebugPage() {
     computeFacePose(frontal, VIDEO_W, VIDEO_H, calibrator);
 
     const p = computeFacePose(lm, VIDEO_W, VIDEO_H, calibrator);
-    const pl = p
+    const pl = p && product
       ? computeOverlayPlacement(
           p,
           product.tryOn,
@@ -120,6 +120,14 @@ export default function TryOnDebugPage() {
   const forehead = pt(10)!;
   const chin = pt(152)!;
   const bridge = pt(168)!;
+
+  if (!product) {
+    return (
+      <div dir="ltr" className="min-h-screen bg-[#111] p-6 font-mono text-sm text-white/70">
+        No products yet — add one in data/products.ts or via /admin, then reload.
+      </div>
+    );
+  }
 
   return (
     <div dir="ltr" className="min-h-screen bg-[#111] p-6 text-white">

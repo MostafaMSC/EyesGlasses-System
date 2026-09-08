@@ -207,7 +207,9 @@ export default function AdminPage() {
       if (result.templesCropped) done.push("قصّ الأذرع الجانبية");
       if (result.lensesDetected) done.push("تحديد مواضع العدسات");
 
-      if (result.lensesDetected) {
+      if (result.warning) {
+        setMessage({ kind: "warn", text: result.warning });
+      } else if (result.lensesDetected) {
         setMessage({ kind: "ok", text: `تمت ${done.join("، و")} تلقائياً.` });
       } else {
         setMessage({

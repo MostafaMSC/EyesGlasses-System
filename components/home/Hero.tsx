@@ -2,13 +2,11 @@
 
 import { useRef } from "react";
 import { motion, useMotionValue, useSpring, useTransform } from "framer-motion";
-import { products, getProductVisualSrc } from "@/data/products";
+import { getProductVisualSrc } from "@/data/products";
+import { useProductStore } from "@/lib/productStore";
 import { useShopUI } from "@/context/ShopUIContext";
 import { Button } from "@/components/ui/Button";
 import { IconCamera, IconGlasses, IconSparkles, IconShieldCheck, IconTruck } from "@/components/ui/Icons";
-
-const heroProduct = products.find((p) => p.id === "p1")!;
-const secondaryProduct = products.find((p) => p.id === "p3")!;
 
 const stats = [
   { value: "+٥٠٠", label: "عميل جرّب المجموعة" },
@@ -18,6 +16,9 @@ const stats = [
 
 export function Hero() {
   const { openTryOn } = useShopUI();
+  const { products } = useProductStore();
+  const heroProduct = products[0];
+  const secondaryProduct = products[1] ?? products[0];
   const stageRef = useRef<HTMLDivElement>(null);
 
   // Pointer-driven tilt on the frame stage. Springs keep it from snapping.
@@ -79,14 +80,16 @@ export function Hero() {
           </p>
 
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-            <Button
-              variant="primary"
-              size="lg"
-              icon={<IconGlasses className="h-5 w-5" />}
-              onClick={() => openTryOn(heroProduct.id)}
-            >
-              جرّب النظارة الآن
-            </Button>
+            {heroProduct && (
+              <Button
+                variant="primary"
+                size="lg"
+                icon={<IconGlasses className="h-5 w-5" />}
+                onClick={() => openTryOn(heroProduct.id)}
+              >
+                جرّب النظارة الآن
+              </Button>
+            )}
             <Button variant="secondary" size="lg" href="/catalog" icon={<IconSparkles className="h-5 w-5" />}>
               تصفح المجموعة
             </Button>
@@ -127,38 +130,44 @@ export function Hero() {
               <div className="aurora -bottom-12 -left-6 h-48 w-48 bg-accent-3/45" />
             </div>
 
-            <div className="animate-float absolute inset-x-[13%] top-[15%] aspect-[5/3]" style={{ transform: "translateZ(60px)" }}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={getProductVisualSrc(heroProduct)}
-                alt=""
-                className="h-full w-full drop-shadow-[0_24px_30px_rgba(0,0,0,0.5)]"
-              />
-            </div>
+            {heroProduct && (
+              <div className="animate-float absolute inset-x-[13%] top-[15%] aspect-[5/3]" style={{ transform: "translateZ(60px)" }}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={getProductVisualSrc(heroProduct)}
+                  alt=""
+                  className="h-full w-full drop-shadow-[0_24px_30px_rgba(0,0,0,0.5)]"
+                />
+              </div>
+            )}
 
-            <div
-              className="animate-float absolute inset-x-[22%] bottom-[15%] aspect-[5/3] opacity-90"
-              style={{ animationDelay: "1.2s", transform: "translateZ(30px)" }}
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={getProductVisualSrc(secondaryProduct)}
-                alt=""
-                className="h-full w-full drop-shadow-[0_18px_24px_rgba(0,0,0,0.45)]"
-              />
-            </div>
+            {products[1] && (
+              <div
+                className="animate-float absolute inset-x-[22%] bottom-[15%] aspect-[5/3] opacity-90"
+                style={{ animationDelay: "1.2s", transform: "translateZ(30px)" }}
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={getProductVisualSrc(secondaryProduct)}
+                  alt=""
+                  className="h-full w-full drop-shadow-[0_18px_24px_rgba(0,0,0,0.45)]"
+                />
+              </div>
+            )}
 
-            <button
-              onClick={() => openTryOn(heroProduct.id)}
-              className="glass shine group absolute bottom-4 left-4 flex items-center gap-2 overflow-hidden rounded-full px-4 py-3 text-xs font-bold text-ink transition hover:border-accent/50 active:scale-95"
-              style={{ transform: "translateZ(80px)" }}
-            >
-              <span className="relative flex h-2.5 w-2.5">
-                <span className="animate-pulse-ring absolute inline-flex h-full w-full rounded-full bg-accent" />
-                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
-              </span>
-              جرّب على وجهك الآن
-            </button>
+            {heroProduct && (
+              <button
+                onClick={() => openTryOn(heroProduct.id)}
+                className="glass shine group absolute bottom-4 left-4 flex items-center gap-2 overflow-hidden rounded-full px-4 py-3 text-xs font-bold text-ink transition hover:border-accent/50 active:scale-95"
+                style={{ transform: "translateZ(80px)" }}
+              >
+                <span className="relative flex h-2.5 w-2.5">
+                  <span className="animate-pulse-ring absolute inline-flex h-full w-full rounded-full bg-accent" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-accent" />
+                </span>
+                جرّب على وجهك الآن
+              </button>
+            )}
 
             <span
               className="glass absolute right-4 top-4 flex items-center gap-1.5 rounded-full px-3 py-2 text-[11px] font-bold text-ink-soft"
