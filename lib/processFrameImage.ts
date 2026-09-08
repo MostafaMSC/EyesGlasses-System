@@ -529,6 +529,44 @@ function detectAndMarkLenses(
   return [left.region, right.region];
 }
 
+/** A pixel this bright and this low-saturation reads as a specular highlight/glare, not the lens's own material colour. */
+const REFLECTION_MIN_CHANNEL = 220;
+const REFLECTION_MAX_SPREAD = 20;
+
+function isReflectionPixel(data: Uint8ClampedArray, i: number): boolean {
+  const r = data[i];
+  const g = data[i + 1];
+  const b = data[i + 2];
+  const min = Math.min(r, g, b);
+  const max = Math.max(r, g, b);
+  return min >= REFLECTION_MIN_CHANNEL && max - min <= REFLECTION_MAX_SPREAD;
+}
+
+/**
+ * A specular highlight on real glass can be blown out bright enough that a
+ * single step from the surrounding mid-tone glass exceeds
+ * LENS_STEP_TOLERANCE, even though the highlight is well within
+ * LENS_GLOBAL_CAP of the seed overall — growLensRegion stops at that hard
+ * edge and leaves the highlight opaque, a solid white fleck sitting inside
+ * an otherwise translucent lens. This sweeps each detected lens's own
+ * bounding box — never the rim, which sits outside it — for any pixel that
+ * still reads as fully opaque and looks like a highlight rather than the
+ * glass itself, and pulls it down to the same glass alpha as the rest of the
+ * lens so it can never survive as a solid patch over the wearer's eye.
+ */
+function clearLensReflections(data: Uint8ClampedArray, w: number, h: number, lenses: LensRegion[]) {
+  for (const lens of lenses) {
+    for (let y = lens.minY; y <= lens.maxY; y++) {
+      for (let x = lens.minX; x <= lens.maxX; x++) {
+        const p = y * w + x;
+        const i = p * 4;
+        if (data[i + 3] <= LENS_ALPHA) continue;
+        if (isReflectionPixel(data, i)) data[i + 3] = LENS_ALPHA;
+      }
+    }
+  }
+}
+
 /**
  * Do these two regions look like the left and right lens of one frame?
  *
@@ -991,6 +1029,9 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
     // transparent regions. This still needs doing — the temple arms have to
     // be cropped off regardless of how the file arrived.
     lenses = findTransparentHoles(data, w, h);
+    // A bright glint can locally break an otherwise-transparent lens hole's
+    // connectivity in the source alpha, leaving an isolated opaque fleck.
+    if (lenses.length === 2) clearLensReflections(data, w, h, lenses);
     // A pre-made transparent PNG can still carry a stray opaque logo/
     // watermark elsewhere in the canvas (e.g. exported from an editor with a
     // brand mark left in a corner) — same cleanup as the ML/heuristic path.
@@ -1026,6 +1067,7 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
       lenses = detectAndMarkLenses(data, w, h, outside, lab, edge, autoSeeds(data, w, h), false);
     }
 
+    if (lenses.length === 2) clearLensReflections(data, w, h, lenses);
     dropDetachedSpecks(data, w, h);
     featherAlpha(data, w, h);
   }
