@@ -991,6 +991,10 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
     // transparent regions. This still needs doing — the temple arms have to
     // be cropped off regardless of how the file arrived.
     lenses = findTransparentHoles(data, w, h);
+    // A pre-made transparent PNG can still carry a stray opaque logo/
+    // watermark elsewhere in the canvas (e.g. exported from an editor with a
+    // brand mark left in a corner) — same cleanup as the ML/heuristic path.
+    dropDetachedSpecks(data, w, h);
   } else {
     const { outside, warning: bgWarning, usedML } = await removeBackground(canvas, data, w, h);
     warning = bgWarning;
