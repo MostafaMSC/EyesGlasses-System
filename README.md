@@ -32,7 +32,11 @@ background**. On upload the app automatically (all in the browser,
 
 1. removes the background by flood-filling inwards from the edges,
 2. makes the lens openings translucent so the wearer's eyes show through,
-3. crops away empty margins,
+3. crops away empty margins and fits the frame into one fixed 800×400 canvas
+   with a consistent 5% padding, so every admin-uploaded frame occupies the
+   same content-to-canvas ratio — two real photos of similarly-sized frames
+   render at the same visual scale on a product card even if one photo's own
+   crop happened to carry more empty margin than the other's,
 4. **detects both lens centres** and sets the alignment automatically.
 
 The only real requirement is that the photo is **shot straight on**. A 3/4
