@@ -6,7 +6,7 @@
     "dev": "next dev",
     "dev:https": "next dev --experimental-https --hostname 192.168.13.49",
     "build": "next build --webpack",
-    "start": "next start",
+    "start": "next start -p 7779",
     "lint": "eslint"
   },
   "dependencies": {
