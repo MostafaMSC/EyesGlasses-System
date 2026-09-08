@@ -165,6 +165,28 @@ site). It feeds a synthetic face through the real tracking pipeline with
 sliders for yaw, roll and head size, and prints the computed pose — use it to
 check a new asset's alignment without needing a camera.
 
+### How the cutout is actually made
+
+`/admin`'s photo upload runs on **real neural segmentation**, not colour
+heuristics: `lib/segmentFrame.ts` runs u2netp (a small U²-Net variant,
+Apache-2.0) client-side via `onnxruntime-web`, self-hosted in
+`public/onnxruntime/` and `public/models/u2netp.onnx` the same way the live
+try-on self-hosts MediaPipe. It's what makes rimless wire frames, gradient
+tints, gold reflections and patterned/textured backgrounds work — a trained
+model has learned "this is a pair of glasses," where colour/edge matching
+only ever had "this pixel resembles that other pixel" to go on. A clear/
+optical lens comes back transparent automatically, since the model sees the
+backdrop through it, same as a person would; a tinted lens looks like solid
+material to the model, so `lib/processFrameImage.ts` still runs a
+colour-seeded search for that case — just confined to an already-accurate
+silhouette instead of having to fight background contamination too. If the
+model can't load for any reason (offline, an unsupported browser, a missing
+asset), processing automatically falls back to the previous CIELAB/Sobel/
+Otsu heuristic pipeline rather than failing outright — a real accuracy
+downgrade, not a crash. Runs single-threaded WASM (no COOP/COEP headers
+needed on the server) — a couple of seconds per upload, which is fine for a
+one-off admin action.
+
 ---
 
 ## How the try-on works
@@ -192,6 +214,22 @@ re-copy them so the WASM matches the JS:
 ```bash
 cp -r node_modules/@mediapipe/tasks-vision/wasm public/mediapipe/
 ```
+
+### Updating the onnxruntime-web assets
+
+Same idea, for the admin-panel segmentation model. If `onnxruntime-web` is
+upgraded, re-copy its **WASM-only** build (not the default bundle — the
+default resolves to a webgl/webgpu-capable build that expects a different
+set of WASM files and 404s against these self-hosted ones):
+
+```bash
+cp node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm public/onnxruntime/
+cp node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs public/onnxruntime/
+cp node_modules/onnxruntime-web/dist/ort.wasm.min.mjs public/onnxruntime/
+```
+
+The model itself (`public/models/u2netp.onnx`) only needs updating if you
+want to swap it for a different segmentation model.
 
 ---
 

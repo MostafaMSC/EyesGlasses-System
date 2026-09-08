@@ -5,8 +5,9 @@
  * alpha, which would paste a white rectangle over the user's face. This runs
  * entirely in the browser and:
  *
- *   1. removes the background (edge-aware flood fill inwards from the edges,
- *      in CIELAB colour space, guided by an Otsu-derived threshold),
+ *   1. removes the background — real ML segmentation (see segmentFrame.ts)
+ *      when it can load, falling back to an edge-aware, CIELAB, Otsu-guided
+ *      flood fill only if it can't,
  *   2. makes the lens openings glassy rather than opaque,
  *   3. crops away empty margins and detached logos/labels,
  *   4. locates the two lens centres so the overlay lands on the eyes — either
@@ -14,6 +15,8 @@
  *
  * Step 4 is what makes an arbitrary photo align correctly without hand-tuning.
  */
+
+import { segmentAlpha } from "@/lib/segmentFrame";
 
 export interface FrameGeometry {
   aspect: number;
@@ -911,6 +914,49 @@ function boundingBox(data: Uint8ClampedArray, w: number, h: number) {
   return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 }
 
+/** Seeds derived from the front-on, centred assumption this file relies on throughout — see FRONT_LENS_SPAN. */
+function autoSeeds(data: Uint8ClampedArray, w: number, h: number) {
+  // Uses the RAW bounding box (before any lens alpha is applied) so the
+  // seeds land inside the still-opaque lens interiors.
+  const content = boundingBox(data, w, h);
+  return {
+    left: { x: content.x + content.w * (0.5 - FRONT_LENS_SPAN / 2), y: content.y + content.h * 0.5 },
+    right: { x: content.x + content.w * (0.5 + FRONT_LENS_SPAN / 2), y: content.y + content.h * 0.5 },
+  };
+}
+
+/**
+ * Removes the background, preferring real ML segmentation and falling back
+ * to the colour/edge heuristics only if the model can't load (offline, an
+ * old browser, a missing self-hosted asset) — so the tool still works
+ * either way instead of hard-failing when ML is unavailable.
+ */
+async function removeBackground(
+  canvas: HTMLCanvasElement,
+  data: Uint8ClampedArray,
+  w: number,
+  h: number
+): Promise<{ outside: Uint8Array; warning?: string; usedML: boolean }> {
+  try {
+    const maskAlpha = await segmentAlpha(canvas, w, h);
+    for (let p = 0; p < w * h; p++) data[p * 4 + 3] = maskAlpha[p];
+    const outside = new Uint8Array(w * h);
+    for (let p = 0; p < w * h; p++) outside[p] = data[p * 4 + 3] <= OPAQUE_THRESHOLD ? 1 : 0;
+    return { outside, usedML: true };
+  } catch (err) {
+    console.error("[processFrameImage] ML segmentation unavailable, using heuristic background removal", err);
+    const lab = buildLabBuffer(data, w, h);
+    const edge = computeEdgeMagnitude(lab, w, h);
+    const { outside, borderCoverage, bg, globalCap } = clearBackground(data, w, h, lab, edge);
+    clearIncidentalGaps(data, w, h, outside, lab, bg, globalCap);
+    const warning =
+      borderCoverage < MIN_BORDER_COVERAGE
+        ? "الخلفية غير موحّدة (بها نقوش أو تدرّج قوي) فلم تُزَل بالكامل تلقائياً — التقط الصورة على خلفية بيضاء بسيطة لأفضل نتيجة."
+        : undefined;
+    return { outside, warning, usedML: false };
+  }
+}
+
 export async function processFrameImage(file: File, manualSeeds?: ManualLensSeeds): Promise<ProcessedFrame> {
   const img = await loadImageFromFile(file);
 
@@ -946,15 +992,10 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
     // be cropped off regardless of how the file arrived.
     lenses = findTransparentHoles(data, w, h);
   } else {
+    const { outside, warning: bgWarning, usedML } = await removeBackground(canvas, data, w, h);
+    warning = bgWarning;
     const lab = buildLabBuffer(data, w, h);
     const edge = computeEdgeMagnitude(lab, w, h);
-
-    const { outside, borderCoverage, bg, globalCap } = clearBackground(data, w, h, lab, edge);
-    if (borderCoverage < MIN_BORDER_COVERAGE) {
-      warning =
-        "الخلفية غير موحّدة (بها نقوش أو تدرّج قوي) فلم تُزَل بالكامل تلقائياً — التقط الصورة على خلفية بيضاء بسيطة لأفضل نتيجة.";
-    }
-    clearIncidentalGaps(data, w, h, outside, lab, bg, globalCap);
 
     if (manualSeeds) {
       const seeds = {
@@ -962,17 +1003,23 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
         right: { x: manualSeeds.rightX * w, y: manualSeeds.rightY * h },
       };
       lenses = detectAndMarkLenses(data, w, h, outside, lab, edge, seeds, true);
+    } else if (usedML) {
+      // A genuinely clear/optical lens already comes back transparent from
+      // the model itself — it looks like backdrop, same as a person would
+      // see — so try that first, purely topologically, before assuming
+      // anything about colour.
+      lenses = findTransparentHoles(data, w, h);
+      const plausible = lenses.length === 2 && isPlausibleLensPair(lenses[0], lenses[1]);
+      if (!plausible) {
+        // A tinted/sunglasses lens looks like solid material to the model
+        // (it has no notion of "glass"), so it comes back opaque along with
+        // the rim — falls through to the same colour-seeded search as the
+        // heuristic path, just now confined to an already-accurate ML
+        // silhouette instead of having to fight background contamination.
+        lenses = detectAndMarkLenses(data, w, h, outside, lab, edge, autoSeeds(data, w, h), false);
+      }
     } else {
-      // Seeded from the front-on, centred assumption this file relies on
-      // throughout — see FRONT_LENS_SPAN — using the RAW bounding box (before
-      // any lens alpha is applied) so the seeds land inside the still-opaque
-      // lens interiors.
-      const rawContent = boundingBox(data, w, h);
-      const seeds = {
-        left: { x: rawContent.x + rawContent.w * (0.5 - FRONT_LENS_SPAN / 2), y: rawContent.y + rawContent.h * 0.5 },
-        right: { x: rawContent.x + rawContent.w * (0.5 + FRONT_LENS_SPAN / 2), y: rawContent.y + rawContent.h * 0.5 },
-      };
-      lenses = detectAndMarkLenses(data, w, h, outside, lab, edge, seeds, false);
+      lenses = detectAndMarkLenses(data, w, h, outside, lab, edge, autoSeeds(data, w, h), false);
     }
 
     dropDetachedSpecks(data, w, h);

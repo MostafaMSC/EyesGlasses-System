@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // Vendored MediaPipe runtime assets — not our source, not linted.
     "public/mediapipe/**",
+    // Vendored onnxruntime-web runtime assets — not our source, not linted.
+    "public/onnxruntime/**",
   ]),
 ]);
 
