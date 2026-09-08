@@ -952,6 +952,44 @@ function boundingBox(data: Uint8ClampedArray, w: number, h: number) {
   return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 }
 
+/** Same as `boundingBox`, but confined to a region rather than the whole canvas — used to re-tighten an already-cropped box. */
+function tightBoxWithin(
+  data: Uint8ClampedArray,
+  w: number,
+  bounds: { x: number; y: number; w: number; h: number }
+) {
+  let minX = bounds.x + bounds.w;
+  let minY = bounds.y + bounds.h;
+  let maxX = bounds.x - 1;
+  let maxY = bounds.y - 1;
+  for (let y = bounds.y; y < bounds.y + bounds.h; y++) {
+    for (let x = bounds.x; x < bounds.x + bounds.w; x++) {
+      if (data[(y * w + x) * 4 + 3] > OPAQUE_THRESHOLD) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX) return { x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h };
+  return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
+}
+
+/**
+ * Every processed frame is fit into one fixed canvas so it occupies the same
+ * content-to-canvas ratio regardless of its own crop tightness. Real photos
+ * arrive shot at every distance and angle; without this, two frames of the
+ * same physical size render at visibly different scales in the catalogue
+ * simply because one photo's crop happened to carry more empty margin than
+ * the other's (`ProductVisual` renders each image at a fixed CSS width, so
+ * how much of that width the frame itself occupies depends entirely on how
+ * tight its own crop was).
+ */
+const FINAL_CANVAS_WIDTH = 800;
+const FINAL_CANVAS_HEIGHT = 400;
+const FINAL_PADDING_FRACTION = 0.05;
+
 /** Seeds derived from the front-on, centred assumption this file relies on throughout — see FRONT_LENS_SPAN. */
 function autoSeeds(data: Uint8ClampedArray, w: number, h: number) {
   // Uses the RAW bounding box (before any lens alpha is applied) so the
@@ -1124,21 +1162,58 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
     geometry = { aspect, lensLeftX: 0.5 - span / 2, lensRightX: 0.5 + span / 2, lensY: 0.5 };
   }
 
+  // Re-tighten within `box` (frontRimBox's own padding can be more generous
+  // than a given frame actually needs — a thin-rimmed frame doesn't need a
+  // browline's full top margin), then pad that by a fixed fraction — not a
+  // lens-relative one — and fit it into the one shared canvas size.
+  const tight = tightBoxWithin(data, w, box);
+  const padX = Math.round(tight.w * FINAL_PADDING_FRACTION);
+  const padY = Math.round(tight.h * FINAL_PADDING_FRACTION);
+  const paddedX0 = clamp(tight.x - padX, box.x, box.x + box.w);
+  const paddedY0 = clamp(tight.y - padY, box.y, box.y + box.h);
+  const paddedX1 = clamp(tight.x + tight.w + padX, box.x, box.x + box.w);
+  const paddedY1 = clamp(tight.y + tight.h + padY, box.y, box.y + box.h);
+  const padded = {
+    x: paddedX0,
+    y: paddedY0,
+    w: Math.max(1, paddedX1 - paddedX0),
+    h: Math.max(1, paddedY1 - paddedY0),
+  };
+
+  const fitScale = Math.min(FINAL_CANVAS_WIDTH / padded.w, FINAL_CANVAS_HEIGHT / padded.h);
+  const drawW = padded.w * fitScale;
+  const drawH = padded.h * fitScale;
+  const offsetX = (FINAL_CANVAS_WIDTH - drawW) / 2;
+  const offsetY = (FINAL_CANVAS_HEIGHT - drawH) / 2;
+
   const out = document.createElement("canvas");
-  out.width = box.w;
-  out.height = box.h;
+  out.width = FINAL_CANVAS_WIDTH;
+  out.height = FINAL_CANVAS_HEIGHT;
   const outCtx = out.getContext("2d");
   if (!outCtx) throw new Error("Canvas is unavailable in this browser.");
-  outCtx.drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+  outCtx.drawImage(canvas, padded.x, padded.y, padded.w, padded.h, offsetX, offsetY, drawW, drawH);
+
+  // Re-express the lens geometry against the new fixed canvas: the fractions
+  // above are relative to `box`, so convert to absolute pixels in the
+  // original working canvas first, then apply this same crop + scale +
+  // centring.
+  const toFinalX = (fracOfBox: number) => (box.x + fracOfBox * box.w - padded.x) * fitScale + offsetX;
+  const toFinalY = (fracOfBox: number) => (box.y + fracOfBox * box.h - padded.y) * fitScale + offsetY;
+  const finalGeometry: FrameGeometry = {
+    aspect: FINAL_CANVAS_WIDTH / FINAL_CANVAS_HEIGHT,
+    lensLeftX: toFinalX(geometry.lensLeftX) / FINAL_CANVAS_WIDTH,
+    lensRightX: toFinalX(geometry.lensRightX) / FINAL_CANVAS_WIDTH,
+    lensY: toFinalY(geometry.lensY) / FINAL_CANVAS_HEIGHT,
+  };
 
   return {
     dataUrl: out.toDataURL("image/png"),
-    geometry,
+    geometry: finalGeometry,
     alreadyTransparent,
     lensesDetected,
     templesCropped: lensesDetected && box.w < contentBox.w - 2,
     warning,
-    width: box.w,
-    height: box.h,
+    width: FINAL_CANVAS_WIDTH,
+    height: FINAL_CANVAS_HEIGHT,
   };
 }
