@@ -5,10 +5,12 @@
  * alpha, which would paste a white rectangle over the user's face. This runs
  * entirely in the browser and:
  *
- *   1. removes the background (flood fill inwards from the edges),
+ *   1. removes the background (edge-aware flood fill inwards from the edges,
+ *      in CIELAB colour space, guided by an Otsu-derived threshold),
  *   2. makes the lens openings glassy rather than opaque,
- *   3. crops away empty margins,
- *   4. locates the two lens centres so the overlay lands on the eyes.
+ *   3. crops away empty margins and detached logos/labels,
+ *   4. locates the two lens centres so the overlay lands on the eyes — either
+ *      automatically, or from two points the admin user clicks.
  *
  * Step 4 is what makes an arbitrary photo align correctly without hand-tuning.
  */
@@ -18,6 +20,14 @@ export interface FrameGeometry {
   lensLeftX: number;
   lensRightX: number;
   lensY: number;
+}
+
+/** Two points the admin user clicked on the ORIGINAL photo, as 0..1 fractions of its width/height. */
+export interface ManualLensSeeds {
+  leftX: number;
+  leftY: number;
+  rightX: number;
+  rightY: number;
 }
 
 interface LensRegion {
@@ -53,57 +63,6 @@ const MAX_DIMENSION = 900;
 const LENS_ALPHA = 38;
 const OPAQUE_THRESHOLD = 30;
 
-/**
- * Background clearing uses two tolerances rather than one fixed reference
- * colour: a small STEP tolerance between neighbouring pixels lets the fill
- * follow gentle gradients and soft shadows (a flat "must match the corner
- * colour exactly" rule breaks on the first vignette), while a looser GLOBAL
- * cap against the original sampled colour stops that gradual drift from
- * eventually crossing all the way into the frame or a light-coloured lens.
- */
-const BG_STEP_TOLERANCE = 26;
-const BG_GLOBAL_CAP = 130;
-/**
- * Fraction of border pixels that must resemble the sampled background colour
- * for the removal to be trusted. Textured or patterned backdrops (a printed
- * backdrop, a wood table, a marbled surface) fail this by design — no flood
- * fill can chroma-key something that was never a flat colour.
- */
-const MIN_BORDER_COVERAGE = 0.65;
-
-/**
- * Lens interiors are grown from a seed point using the SAME
- * step/global-cap approach, but seeded from the lens's own colour rather
- * than the backdrop's. This is what makes it work regardless of whether the
- * lens happens to be light, dark, tinted or mid-photo reflecting a window —
- * the old approach required the lens to accidentally match the background,
- * which real glass essentially never does.
- */
-const LENS_STEP_TOLERANCE = 30;
-const LENS_GLOBAL_CAP = 100;
-
-/**
- * Lens-centre span as a fraction of the frame front's own width. In the boxing
- * system the centres sit (lens width + bridge) apart inside a front of
- * (2x lens width + bridge + rim), which lands near 0.53 for every size of
- * frame — unlike the front's aspect ratio, which swings with lens depth.
- */
-const FRONT_LENS_SPAN = 0.53;
-/**
- * Widest a frame front alone plausibly gets. Only used when the front could
- * not be isolated, and set at the edge of the real range rather than the
- * middle: a shallow front and a deep front with its arms still attached look
- * alike from the aspect ratio, so shrink only what cannot be a front at all.
- */
-const WIDEST_FRONT_ASPECT = 3.4;
-/**
- * Opaque blobs smaller than this fraction of the largest one are cleared.
- * Flood fill leaves flecks behind wherever the background is uneven (JPEG
- * ringing, a soft shadow under the frame, a reflection on the shooting
- * surface), and on a face those read as scratches floating over the cheek.
- */
-const SPECK_FRACTION = 0.1;
-
 const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
 
 function loadImageFromFile(file: File): Promise<HTMLImageElement> {
@@ -122,39 +81,151 @@ function loadImageFromFile(file: File): Promise<HTMLImageElement> {
   });
 }
 
-function colorDistance(
-  data: Uint8ClampedArray,
-  i: number,
-  r: number,
-  g: number,
-  b: number
-): number {
-  return Math.abs(data[i] - r) + Math.abs(data[i + 1] - g) + Math.abs(data[i + 2] - b);
+/* ------------------------------------------------------------------ *
+ * CIELAB colour space
+ *
+ * Perceived lightness (L) and colour (a, b) are separated deliberately: a
+ * cast shadow on a white backdrop is almost pure ΔL with very little ΔA/ΔB,
+ * while an actual material change (rim vs backdrop, lens vs rim) carries real
+ * chroma difference. Down-weighting L stops a shadow from reading as "this
+ * must be a different object" the way a flat RGB distance does.
+ * ------------------------------------------------------------------ */
+
+function srgbToLinear(c: number): number {
+  const cs = c / 255;
+  return cs <= 0.04045 ? cs / 12.92 : Math.pow((cs + 0.055) / 1.055, 2.4);
 }
 
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
+function rgbToLab(r: number, g: number, b: number): [number, number, number] {
+  const rl = srgbToLinear(r);
+  const gl = srgbToLinear(g);
+  const bl = srgbToLinear(b);
+  // sRGB -> XYZ (D65)
+  const x = rl * 0.4124564 + gl * 0.3575761 + bl * 0.1804375;
+  const y = rl * 0.2126729 + gl * 0.7151522 + bl * 0.072175;
+  const z = rl * 0.0193339 + gl * 0.119192 + bl * 0.9503041;
+  const xn = x / 0.95047;
+  const yn = y / 1.0;
+  const zn = z / 1.08883;
+  const f = (t: number) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  const fx = f(xn);
+  const fy = f(yn);
+  const fz = f(zn);
+  return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)];
+}
+
+/** L, a, b interleaved per pixel — computed once and reused by every pass below. */
+function buildLabBuffer(data: Uint8ClampedArray, w: number, h: number): Float32Array {
+  const lab = new Float32Array(w * h * 3);
+  for (let p = 0; p < w * h; p++) {
+    const i = p * 4;
+    const [L, A, B] = rgbToLab(data[i], data[i + 1], data[i + 2]);
+    lab[p * 3] = L;
+    lab[p * 3 + 1] = A;
+    lab[p * 3 + 2] = B;
+  }
+  return lab;
+}
+
+/** Lightness is down-weighted so shadows (mostly ΔL) read as smaller than a real material change. */
+const LAB_L_WEIGHT = 0.5;
+
+function labDistance(lab: Float32Array, p: number, L: number, A: number, B: number): number {
+  const i = p * 3;
+  return LAB_L_WEIGHT * Math.abs(lab[i] - L) + Math.abs(lab[i + 1] - A) + Math.abs(lab[i + 2] - B);
+}
+
+/* ------------------------------------------------------------------ *
+ * Sobel edge map
+ *
+ * Flood fill alone can leak through a thin bright metal rim if it happens to
+ * sit close in colour to the backdrop under normal lighting. A structural
+ * edge map gives the fill a hard wall to respect regardless of colour
+ * similarity — a rim is always a strong luminance edge even when it is a
+ * weak colour one.
+ * ------------------------------------------------------------------ */
+
+function computeEdgeMagnitude(lab: Float32Array, w: number, h: number): Float32Array {
+  const mag = new Float32Array(w * h);
+  const L = (x: number, y: number) => lab[(y * w + x) * 3];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - 1);
+      const x1 = Math.min(w - 1, x + 1);
+      const y0 = Math.max(0, y - 1);
+      const y1 = Math.min(h - 1, y + 1);
+      const gx = -L(x0, y0) - 2 * L(x0, y) - L(x0, y1) + L(x1, y0) + 2 * L(x1, y) + L(x1, y1);
+      const gy = -L(x0, y0) - 2 * L(x, y0) - L(x1, y0) + L(x0, y1) + 2 * L(x, y1) + L(x1, y1);
+      mag[y * w + x] = Math.sqrt(gx * gx + gy * gy);
+    }
+  }
+  return mag;
 }
 
 /**
- * Background colour sampled as the per-channel median across many border
- * pixels, not just the four corners — a corner landing on a logo, a prop, or
- * a shadow used to throw the whole removal off by itself.
+ * A candidate pixel this close to a strong luminance edge is never crossed by
+ * a fill, win or lose on colour. Calibrated empirically: low enough to hold a
+ * wall at a thin, bright, low-contrast metal rim against a near-white
+ * backdrop (tested down to ~25 before it stops helping at all), high enough
+ * to ignore ordinary sensor/JPEG noise on a flat background (tested up to
+ * +/-3 per channel with no false walls at this threshold).
  */
-function sampleBackground(data: Uint8ClampedArray, w: number, h: number) {
-  const rs: number[] = [];
-  const gs: number[] = [];
-  const bs: number[] = [];
+const SOBEL_EDGE_THRESHOLD = 25;
+
+/* ------------------------------------------------------------------ *
+ * Otsu's method
+ *
+ * Rather than one hand-picked "background tolerance" constant for every
+ * photo, this bins every pixel's Lab distance from the sampled background
+ * colour into a histogram and finds the threshold that best separates it
+ * into two populations (background-like vs foreground-like) by maximising
+ * between-class variance — the standard Otsu binarisation algorithm, applied
+ * to "distance from background" instead of raw grey level.
+ * ------------------------------------------------------------------ */
+
+function otsuThreshold(hist: Float64Array): number {
+  const total = hist.reduce((a, b) => a + b, 0);
+  if (total <= 0) return 0;
+  let sum = 0;
+  for (let t = 0; t < hist.length; t++) sum += t * hist[t];
+
+  let sumB = 0;
+  let wB = 0;
+  let maxBetween = 0;
+  let threshold = 0;
+  for (let t = 0; t < hist.length; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maxBetween) {
+      maxBetween = between;
+      threshold = t;
+    }
+  }
+  return threshold;
+}
+
+/**
+ * Median colour, in Lab, sampled from many border points rather than just the
+ * four corners — a corner landing on a logo, a prop, or a shadow used to
+ * throw the whole removal off by itself.
+ */
+function sampleBackgroundLab(lab: Float32Array, w: number, h: number): [number, number, number] {
+  const Ls: number[] = [];
+  const As: number[] = [];
+  const Bs: number[] = [];
   const step = Math.max(1, Math.floor(Math.min(w, h) / 40));
-
   const sample = (x: number, y: number) => {
-    const i = (y * w + x) * 4;
-    rs.push(data[i]);
-    gs.push(data[i + 1]);
-    bs.push(data[i + 2]);
+    const p = (y * w + x) * 3;
+    Ls.push(lab[p]);
+    As.push(lab[p + 1]);
+    Bs.push(lab[p + 2]);
   };
-
   for (let x = 0; x < w; x += step) {
     sample(x, 0);
     sample(x, h - 1);
@@ -163,33 +234,81 @@ function sampleBackground(data: Uint8ClampedArray, w: number, h: number) {
     sample(0, y);
     sample(w - 1, y);
   }
-
-  return { r: median(rs), g: median(gs), b: median(bs) };
+  const median = (values: number[]) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  };
+  return [median(Ls), median(As), median(Bs)];
 }
 
+/** Border-sample variance of distance-from-background — the perimeter check for a non-uniform backdrop. */
+function borderVariance(lab: Float32Array, w: number, h: number, bg: [number, number, number]): number {
+  const step = Math.max(1, Math.floor(Math.min(w, h) / 40));
+  const dists: number[] = [];
+  const sample = (x: number, y: number) => dists.push(labDistance(lab, y * w + x, bg[0], bg[1], bg[2]));
+  for (let x = 0; x < w; x += step) {
+    sample(x, 0);
+    sample(x, h - 1);
+  }
+  for (let y = 0; y < h; y += step) {
+    sample(0, y);
+    sample(w - 1, y);
+  }
+  const mean = dists.reduce((a, b) => a + b, 0) / dists.length;
+  const variance = dists.reduce((a, b) => a + (b - mean) * (b - mean), 0) / dists.length;
+  return Math.sqrt(variance);
+}
+
+const BG_CAP_MIN = 35;
+const BG_CAP_MAX = 170;
+const BG_STEP_BASE = 12;
+const BG_STEP_VARIANCE_GAIN = 0.5;
+const BG_STEP_MIN = 9;
+const BG_STEP_MAX = 34;
 /**
- * Flood fill inward from every border pixel, clearing the background. Two
- * tolerances make this hold up on real product photography instead of only
- * flat-colour backdrops:
+ * Fraction of border pixels that must resemble the sampled background colour
+ * for the removal to be trusted. Textured or patterned backdrops (a printed
+ * backdrop, a wood table, a marbled surface) fail this by design — no flood
+ * fill can chroma-key something that was never a flat colour.
+ */
+const MIN_BORDER_COVERAGE = 0.65;
+
+/**
+ * Flood fill inward from every border pixel, clearing the background.
  *
- *   - STEP: the candidate pixel must be close to the neighbour that is
- *     already-cleared next to it, so smooth gradients and soft shadows get
- *     followed rather than stopping the fill dead at the first darker pixel.
- *   - GLOBAL CAP: the candidate must still resemble the originally sampled
- *     background colour overall, so that gradual drift can never tunnel all
- *     the way into the frame or a light lens.
- *
- * `borderCoverage` reports how much of the image border actually resembled
- * the sampled background — low coverage means the backdrop was never a
- * removable flat colour (texture, a patterned surface, a photo prop) and the
- * caller should say so rather than silently shipping a bad cutout.
+ * Two tolerances (both adaptive, not fixed) control the fill:
+ *   - STEP: a candidate must be close to the neighbour that already got
+ *     cleared, in Lab space — this lets it follow gradients and soft shadows.
+ *     Its size scales with how noisy the border actually is (perimeter
+ *     variance check): a flat backdrop gets a tight step, a slightly uneven
+ *     one gets a bit more slack.
+ *   - GLOBAL CAP: how far a pixel may drift from the original sampled colour
+ *     overall, derived per-photo by Otsu-thresholding the whole image's
+ *     distance-from-background histogram, rather than one constant that is
+ *     too loose for some photos and too tight for others.
+ * A Sobel edge map is checked on every step too: a strong luminance edge is
+ * never crossed, which is what stops the fill from bleeding through a thin
+ * bright rim that happens to be close in colour to the backdrop.
  */
 function clearBackground(
   data: Uint8ClampedArray,
   w: number,
-  h: number
-): { outside: Uint8Array; borderCoverage: number } {
-  const bg = sampleBackground(data, w, h);
+  h: number,
+  lab: Float32Array,
+  edge: Float32Array
+): { outside: Uint8Array; borderCoverage: number; bg: [number, number, number]; globalCap: number } {
+  const bg = sampleBackgroundLab(lab, w, h);
+  const stddev = borderVariance(lab, w, h, bg);
+
+  // Otsu threshold on the whole image's distance-from-background histogram.
+  const hist = new Float64Array(256);
+  for (let p = 0; p < w * h; p++) {
+    const d = Math.min(255, Math.round(labDistance(lab, p, bg[0], bg[1], bg[2])));
+    hist[d]++;
+  }
+  const globalCap = clamp(otsuThreshold(hist), BG_CAP_MIN, BG_CAP_MAX);
+  const stepTolerance = clamp(BG_STEP_BASE + stddev * BG_STEP_VARIANCE_GAIN, BG_STEP_MIN, BG_STEP_MAX);
+
   const outside = new Uint8Array(w * h);
   const stack: number[] = [];
   let borderTotal = 0;
@@ -198,19 +317,21 @@ function clearBackground(
   const seedBorder = (x: number, y: number) => {
     borderTotal++;
     const p = y * w + x;
-    if (colorDistance(data, p * 4, bg.r, bg.g, bg.b) > BG_GLOBAL_CAP) return;
+    if (labDistance(lab, p, bg[0], bg[1], bg[2]) > globalCap) return;
     borderMatched++;
     if (outside[p]) return;
     outside[p] = 1;
     stack.push(p);
   };
 
-  const tryPush = (x: number, y: number, refR: number, refG: number, refB: number) => {
+  const tryPush = (x: number, y: number, refP: number) => {
     if (x < 0 || y < 0 || x >= w || y >= h) return;
     const p = y * w + x;
     if (outside[p]) return;
-    if (colorDistance(data, p * 4, refR, refG, refB) > BG_STEP_TOLERANCE) return;
-    if (colorDistance(data, p * 4, bg.r, bg.g, bg.b) > BG_GLOBAL_CAP) return;
+    if (edge[p] > SOBEL_EDGE_THRESHOLD) return; // hard wall, regardless of colour
+    const ri = refP * 3;
+    if (labDistance(lab, p, lab[ri], lab[ri + 1], lab[ri + 2]) > stepTolerance) return;
+    if (labDistance(lab, p, bg[0], bg[1], bg[2]) > globalCap) return;
     outside[p] = 1;
     stack.push(p);
   };
@@ -228,20 +349,17 @@ function clearBackground(
     const p = stack.pop()!;
     const x = p % w;
     const y = (p / w) | 0;
-    const r = data[p * 4];
-    const g = data[p * 4 + 1];
-    const b = data[p * 4 + 2];
-    tryPush(x + 1, y, r, g, b);
-    tryPush(x - 1, y, r, g, b);
-    tryPush(x, y + 1, r, g, b);
-    tryPush(x, y - 1, r, g, b);
+    tryPush(x + 1, y, p);
+    tryPush(x - 1, y, p);
+    tryPush(x, y + 1, p);
+    tryPush(x, y - 1, p);
   }
 
   for (let p = 0; p < w * h; p++) {
     if (outside[p]) data[p * 4 + 3] = 0;
   }
 
-  return { outside, borderCoverage: borderTotal > 0 ? borderMatched / borderTotal : 0 };
+  return { outside, borderCoverage: borderTotal > 0 ? borderMatched / borderTotal : 0, bg, globalCap };
 }
 
 /**
@@ -252,13 +370,20 @@ function clearBackground(
  * background's — this pass only mops up incidental holes so they don't sit
  * on the wearer's face as stray background-coloured patches.
  */
-function clearIncidentalGaps(data: Uint8ClampedArray, w: number, h: number, outside: Uint8Array) {
-  const bg = sampleBackground(data, w, h);
+function clearIncidentalGaps(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  outside: Uint8Array,
+  lab: Float32Array,
+  bg: [number, number, number],
+  globalCap: number
+) {
   const visited = new Uint8Array(w * h);
 
   for (let start = 0; start < w * h; start++) {
     if (visited[start] || outside[start]) continue;
-    if (colorDistance(data, start * 4, bg.r, bg.g, bg.b) > BG_GLOBAL_CAP) continue;
+    if (labDistance(lab, start, bg[0], bg[1], bg[2]) > globalCap) continue;
 
     const members: number[] = [start];
     visited[start] = 1;
@@ -276,7 +401,7 @@ function clearIncidentalGaps(data: Uint8ClampedArray, w: number, h: number, outs
       ];
       for (const n of neighbours) {
         if (n < 0 || visited[n] || outside[n]) continue;
-        if (colorDistance(data, n * 4, bg.r, bg.g, bg.b) > BG_GLOBAL_CAP) continue;
+        if (labDistance(lab, n, bg[0], bg[1], bg[2]) > globalCap) continue;
         visited[n] = 1;
         stack.push(n);
         members.push(n);
@@ -287,19 +412,25 @@ function clearIncidentalGaps(data: Uint8ClampedArray, w: number, h: number, outs
   }
 }
 
+const LENS_STEP_TOLERANCE = 16;
+const LENS_GLOBAL_CAP = 48;
+
 /**
  * Grows a lens region from a single seed point using the seed's OWN colour as
  * the reference, not the background's. A real lens is glass-grey, blue-ish,
  * tinted, or carries a bright reflection streak — essentially never the same
  * shade as the backdrop — so this is what actually finds it, where matching
  * against the background colour (the old approach) always failed and left
- * the lens fully opaque at its photographed colour.
+ * the lens fully opaque at its photographed colour. The same Sobel edge map
+ * used for background removal stops growth from crossing into the rim.
  */
 function growLensRegion(
   data: Uint8ClampedArray,
   w: number,
   h: number,
   outside: Uint8Array,
+  lab: Float32Array,
+  edge: Float32Array,
   seedX: number,
   seedY: number
 ): { region: LensRegion; members: number[] } | null {
@@ -308,9 +439,10 @@ function growLensRegion(
   const start = sy * w + sx;
   if (outside[start]) return null;
 
-  const seedR = data[start * 4];
-  const seedG = data[start * 4 + 1];
-  const seedB = data[start * 4 + 2];
+  const si = start * 3;
+  const seedL = lab[si];
+  const seedA = lab[si + 1];
+  const seedB = lab[si + 2];
 
   const visited = new Uint8Array(w * h);
   visited[start] = 1;
@@ -337,6 +469,7 @@ function growLensRegion(
     if (y > maxY) maxY = y;
     members.push(p);
 
+    const pi = p * 3;
     const neighbours = [
       x + 1 < w ? p + 1 : -1,
       x - 1 >= 0 ? p - 1 : -1,
@@ -345,9 +478,9 @@ function growLensRegion(
     ];
     for (const n of neighbours) {
       if (n < 0 || visited[n] || outside[n]) continue;
-      if (colorDistance(data, n * 4, data[p * 4], data[p * 4 + 1], data[p * 4 + 2]) > LENS_STEP_TOLERANCE)
-        continue;
-      if (colorDistance(data, n * 4, seedR, seedG, seedB) > LENS_GLOBAL_CAP) continue;
+      if (edge[n] > SOBEL_EDGE_THRESHOLD) continue; // hard wall at the rim
+      if (labDistance(lab, n, lab[pi], lab[pi + 1], lab[pi + 2]) > LENS_STEP_TOLERANCE) continue;
+      if (labDistance(lab, n, seedL, seedA, seedB) > LENS_GLOBAL_CAP) continue;
       visited[n] = 1;
       stack.push(n);
     }
@@ -357,27 +490,35 @@ function growLensRegion(
 }
 
 /**
- * Finds both lenses by growing outward from two seed points placed using the
- * same front-on, centred assumption the rest of this file relies on (see
- * FRONT_LENS_SPAN), then marks exactly the grown pixels — not their bounding
- * box — as translucent glass.
+ * Lens-centre span as a fraction of the frame front's own width. In the boxing
+ * system the centres sit (lens width + bridge) apart inside a front of
+ * (2x lens width + bridge + rim), which lands near 0.53 for every size of
+ * frame — unlike the front's aspect ratio, which swings with lens depth.
+ */
+const FRONT_LENS_SPAN = 0.53;
+
+/**
+ * Finds both lenses by growing outward from two seed points, then marks
+ * exactly the grown pixels — not their bounding box — as translucent glass.
+ * Seeds are either the caller's own click points (trusted outright, no
+ * pair-plausibility gate — a human already pointed at both lenses) or the
+ * front-on, centred FRONT_LENS_SPAN guess (validated with
+ * `isPlausibleLensPair`, since it can land on a gap or glare instead).
  */
 function detectAndMarkLenses(
   data: Uint8ClampedArray,
   w: number,
   h: number,
   outside: Uint8Array,
-  content: { x: number; y: number; w: number; h: number }
+  lab: Float32Array,
+  edge: Float32Array,
+  seeds: { left: { x: number; y: number }; right: { x: number; y: number } },
+  trustSeeds: boolean
 ): LensRegion[] {
-  const seedY = content.y + content.h * 0.5;
-  const leftSeedX = content.x + content.w * (0.5 - FRONT_LENS_SPAN / 2);
-  const rightSeedX = content.x + content.w * (0.5 + FRONT_LENS_SPAN / 2);
-
-  const left = growLensRegion(data, w, h, outside, leftSeedX, seedY);
-  const right = growLensRegion(data, w, h, outside, rightSeedX, seedY);
+  const left = growLensRegion(data, w, h, outside, lab, edge, seeds.left.x, seeds.left.y);
+  const right = growLensRegion(data, w, h, outside, lab, edge, seeds.right.x, seeds.right.y);
   if (!left || !right) return [];
-
-  if (!isPlausibleLensPair(left.region, right.region)) return [];
+  if (!trustSeeds && !isPlausibleLensPair(left.region, right.region)) return [];
 
   for (const p of left.members) data[p * 4 + 3] = LENS_ALPHA;
   for (const p of right.members) data[p * 4 + 3] = LENS_ALPHA;
@@ -405,16 +546,35 @@ function isPlausibleLensPair(a: LensRegion, b: LensRegion): boolean {
 }
 
 /**
- * Clears opaque islands that are too small to be part of the frame.
+ * Clears opaque islands that are too small, or too far away and too small
+ * to matter, to be part of the frame.
  *
- * A frame is one connected object (plus, at most, a detached lens or nose
- * pad), so anything left over that is a fraction of the main body's size is
- * background the flood fill could not reach — it survives the crop and paints
- * stray marks across the wearer's face.
+ * A frame is normally one connected object — the bridge physically joins
+ * both lens rims — so a second island sitting well outside the main body's
+ * footprint is usually background the flood fill could not reach: a printed
+ * logo elsewhere on the backdrop, a corner watermark, a model-number
+ * sticker. Left alone these survive the crop and paint stray marks or whole
+ * extra shapes across the wearer's face.
+ *
+ * The distance check alone is not enough, though: on a delicate rimless or
+ * semi-rimless frame the bridge can be a wire thin enough that the fill
+ * nicks it, genuinely splitting the two lenses into separate islands of
+ * comparable size — that is the other half of the frame, not a logo, and
+ * must never be dropped just for sitting outside the "main" island's
+ * footprint. A real logo is essentially always much smaller than a lens, so
+ * only a *small and distant* island is treated as detached; a large distant
+ * one is kept and left for `frontRimBox`/`boundingBox` to span across.
  */
+const SPECK_FRACTION = 0.1;
+/** How far (as a fraction of the main blob's own size) a detached island may sit and still be considered "attached". */
+const DETACHED_MARGIN_FRACTION = 0.6;
+/** An island above this fraction of the main one is assumed to be a real part of the frame, never a logo, regardless of distance. */
+const DETACHED_MAX_SIZE_FRACTION = 0.5;
+
 function dropDetachedSpecks(data: Uint8ClampedArray, w: number, h: number) {
   const label = new Int32Array(w * h).fill(-1);
   const areas: number[] = [];
+  const boxes: { minX: number; maxX: number; minY: number; maxY: number }[] = [];
   const stack: number[] = [];
 
   for (let start = 0; start < w * h; start++) {
@@ -422,6 +582,10 @@ function dropDetachedSpecks(data: Uint8ClampedArray, w: number, h: number) {
 
     const id = areas.length;
     let area = 0;
+    let minX = w;
+    let maxX = 0;
+    let minY = h;
+    let maxY = 0;
     label[start] = id;
     stack.push(start);
 
@@ -430,6 +594,10 @@ function dropDetachedSpecks(data: Uint8ClampedArray, w: number, h: number) {
       area++;
       const x = p % w;
       const y = (p / w) | 0;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
       const nb = [
         x + 1 < w ? p + 1 : -1,
         x - 1 >= 0 ? p - 1 : -1,
@@ -443,14 +611,31 @@ function dropDetachedSpecks(data: Uint8ClampedArray, w: number, h: number) {
       }
     }
     areas.push(area);
+    boxes.push({ minX, maxX, minY, maxY });
   }
 
   if (areas.length < 2) return;
-  const largest = Math.max(...areas);
+  const mainId = areas.indexOf(Math.max(...areas));
+  const largest = areas[mainId];
+  const mainBox = boxes[mainId];
   const minArea = largest * SPECK_FRACTION;
+  const margin = Math.max(mainBox.maxX - mainBox.minX, mainBox.maxY - mainBox.minY) * DETACHED_MARGIN_FRACTION;
+  const expanded = {
+    minX: mainBox.minX - margin,
+    maxX: mainBox.maxX + margin,
+    minY: mainBox.minY - margin,
+    maxY: mainBox.maxY + margin,
+  };
+
+  const overlapsMain = (b: { minX: number; maxX: number; minY: number; maxY: number }) =>
+    b.maxX >= expanded.minX && b.minX <= expanded.maxX && b.maxY >= expanded.minY && b.minY <= expanded.maxY;
+
   for (let p = 0; p < w * h; p++) {
     const id = label[p];
-    if (id >= 0 && areas[id] < minArea) data[p * 4 + 3] = 0;
+    if (id < 0 || id === mainId) continue;
+    const tooSmall = areas[id] < minArea;
+    const detached = !overlapsMain(boxes[id]) && areas[id] < largest * DETACHED_MAX_SIZE_FRACTION;
+    if (tooSmall || detached) data[p * 4 + 3] = 0;
   }
 }
 
@@ -602,6 +787,14 @@ function findTransparentHoles(data: Uint8ClampedArray, w: number, h: number): Le
 }
 
 /**
+ * Widest a frame front alone plausibly gets. Only used when the front could
+ * not be isolated, and set at the edge of the real range rather than the
+ * middle: a shallow front and a deep front with its arms still attached look
+ * alike from the aspect ratio, so shrink only what cannot be a front at all.
+ */
+const WIDEST_FRONT_ASPECT = 3.4;
+
+/**
  * Fallback temple removal when the lens openings can't be found (printed
  * logos and etched model numbers on the lens break the flood fill).
  *
@@ -718,7 +911,7 @@ function boundingBox(data: Uint8ClampedArray, w: number, h: number) {
   return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 }
 
-export async function processFrameImage(file: File): Promise<ProcessedFrame> {
+export async function processFrameImage(file: File, manualSeeds?: ManualLensSeeds): Promise<ProcessedFrame> {
   const img = await loadImageFromFile(file);
 
   const scale = Math.min(1, MAX_DIMENSION / Math.max(img.width, img.height));
@@ -753,18 +946,35 @@ export async function processFrameImage(file: File): Promise<ProcessedFrame> {
     // be cropped off regardless of how the file arrived.
     lenses = findTransparentHoles(data, w, h);
   } else {
-    const { outside, borderCoverage } = clearBackground(data, w, h);
+    const lab = buildLabBuffer(data, w, h);
+    const edge = computeEdgeMagnitude(lab, w, h);
+
+    const { outside, borderCoverage, bg, globalCap } = clearBackground(data, w, h, lab, edge);
     if (borderCoverage < MIN_BORDER_COVERAGE) {
       warning =
         "الخلفية غير موحّدة (بها نقوش أو تدرّج قوي) فلم تُزَل بالكامل تلقائياً — التقط الصورة على خلفية بيضاء بسيطة لأفضل نتيجة.";
     }
-    clearIncidentalGaps(data, w, h, outside);
-    // Seeded from the front-on, centred assumption this file relies on
-    // throughout — see FRONT_LENS_SPAN — using the RAW bounding box (before
-    // any lens alpha is applied) so the seeds land inside the still-opaque
-    // lens interiors.
-    const rawContent = boundingBox(data, w, h);
-    lenses = detectAndMarkLenses(data, w, h, outside, rawContent);
+    clearIncidentalGaps(data, w, h, outside, lab, bg, globalCap);
+
+    if (manualSeeds) {
+      const seeds = {
+        left: { x: manualSeeds.leftX * w, y: manualSeeds.leftY * h },
+        right: { x: manualSeeds.rightX * w, y: manualSeeds.rightY * h },
+      };
+      lenses = detectAndMarkLenses(data, w, h, outside, lab, edge, seeds, true);
+    } else {
+      // Seeded from the front-on, centred assumption this file relies on
+      // throughout — see FRONT_LENS_SPAN — using the RAW bounding box (before
+      // any lens alpha is applied) so the seeds land inside the still-opaque
+      // lens interiors.
+      const rawContent = boundingBox(data, w, h);
+      const seeds = {
+        left: { x: rawContent.x + rawContent.w * (0.5 - FRONT_LENS_SPAN / 2), y: rawContent.y + rawContent.h * 0.5 },
+        right: { x: rawContent.x + rawContent.w * (0.5 + FRONT_LENS_SPAN / 2), y: rawContent.y + rawContent.h * 0.5 },
+      };
+      lenses = detectAndMarkLenses(data, w, h, outside, lab, edge, seeds, false);
+    }
+
     dropDetachedSpecks(data, w, h);
     featherAlpha(data, w, h);
   }
@@ -789,7 +999,7 @@ export async function processFrameImage(file: File): Promise<ProcessedFrame> {
       lensRightX: (lenses[1].cx - candidateBox.x) / candidateBox.w,
       lensY: ((lenses[0].cy + lenses[1].cy) / 2 - candidateBox.y) / candidateBox.h,
     };
-    if (isPlausibleGeometry(candidate)) {
+    if (isPlausibleGeometry(candidate) || manualSeeds) {
       box = candidateBox;
       geometry = candidate;
       lensesDetected = true;

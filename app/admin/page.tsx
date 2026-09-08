@@ -1,11 +1,11 @@
 "use client";
 
-import { useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { frameSvgDataUri, type FrameShape } from "@/lib/frameShapes";
 import { getProductVisualSrc, type Availability, type Category, type Product } from "@/data/products";
 import { newProductId, slugify, useProductStore } from "@/lib/productStore";
-import { processFrameImage } from "@/lib/processFrameImage";
+import { processFrameImage, type ManualLensSeeds, type ProcessedFrame } from "@/lib/processFrameImage";
 import { useShopUI } from "@/context/ShopUIContext";
 import { formatPrice } from "@/lib/format";
 import { Container } from "@/components/ui/Container";
@@ -100,6 +100,8 @@ export default function AdminPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: "ok" | "warn" | "error"; text: string } | null>(null);
   const [processing, setProcessing] = useState(false);
+  const [lastFile, setLastFile] = useState<File | null>(null);
+  const [pickingSeeds, setPickingSeeds] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
@@ -172,6 +174,8 @@ export default function AdminPage() {
       }
       setForm(EMPTY);
       setEditingId(null);
+      setLastFile(null);
+      setPickingSeeds(false);
       if (fileRef.current) fileRef.current.value = "";
     } catch {
       setMessage({
@@ -181,46 +185,69 @@ export default function AdminPage() {
     }
   };
 
+  const applyProcessedResult = (result: ProcessedFrame, manual: boolean) => {
+    setForm((f) => ({
+      ...f,
+      overlayImage: result.dataUrl,
+      imageAspect: result.geometry.aspect,
+      lensLeftX: result.geometry.lensLeftX,
+      lensRightX: result.geometry.lensRightX,
+      lensY: result.geometry.lensY,
+      // The temple arms are cropped off during processing, so the image edge
+      // is now the rim itself — barely any fade is wanted.
+      edgeFade: result.templesCropped ? 0.04 : f.edgeFade,
+    }));
+
+    const done: string[] = [];
+    if (!result.alreadyTransparent) done.push("إزالة الخلفية");
+    if (result.templesCropped) done.push("قصّ الأذرع الجانبية");
+    if (result.lensesDetected) done.push("تحديد مواضع العدسات");
+
+    if (manual) {
+      setMessage({ kind: "ok", text: "تم تحديد العدسات من النقرتين." });
+    } else if (result.warning) {
+      setMessage({ kind: "warn", text: result.warning });
+    } else if (result.lensesDetected) {
+      setMessage({ kind: "ok", text: `تمت ${done.join("، و")} تلقائياً.` });
+    } else {
+      setMessage({
+        kind: "warn",
+        text: `تمت ${done.join("، و")}، لكن لم يتم تحديد العدسات تلقائياً. اضغط "تحديد العدسات بالنقر" بالأسفل، أو عدّل الأشرطة يدوياً.`,
+      });
+    }
+  };
+
   const handleImage = async (file: File) => {
     if (file.size > MAX_IMAGE_BYTES) {
       setMessage({ kind: "error", text: "حجم الصورة كبير. الحد الأقصى 1.5 ميغابايت." });
       return;
     }
+    setLastFile(file);
+    setPickingSeeds(false);
     setProcessing(true);
     setMessage(null);
     try {
       const result = await processFrameImage(file);
-      setForm((f) => ({
-        ...f,
-        overlayImage: result.dataUrl,
-        imageAspect: result.geometry.aspect,
-        lensLeftX: result.geometry.lensLeftX,
-        lensRightX: result.geometry.lensRightX,
-        lensY: result.geometry.lensY,
-        // The temple arms are cropped off during processing, so the image edge
-        // is now the rim itself — barely any fade is wanted.
-        edgeFade: result.templesCropped ? 0.04 : f.edgeFade,
-      }));
-
-      const done: string[] = [];
-      if (!result.alreadyTransparent) done.push("إزالة الخلفية");
-      if (result.templesCropped) done.push("قصّ الأذرع الجانبية");
-      if (result.lensesDetected) done.push("تحديد مواضع العدسات");
-
-      if (result.warning) {
-        setMessage({ kind: "warn", text: result.warning });
-      } else if (result.lensesDetected) {
-        setMessage({ kind: "ok", text: `تمت ${done.join("، و")} تلقائياً.` });
-      } else {
-        setMessage({
-          kind: "warn",
-          text: `تمت ${done.join("، و")}، لكن لم يتم تحديد العدسات تلقائياً. عدّل مواضع العدسات يدوياً بالأسفل.`,
-        });
-      }
+      applyProcessedResult(result, false);
     } catch {
       setMessage({ kind: "error", text: "تعذّرت معالجة الصورة. جرّب صورة أخرى." });
     } finally {
       setProcessing(false);
+    }
+  };
+
+  const handleManualSeeds = async (seeds: ManualLensSeeds) => {
+    if (!lastFile) return;
+    setProcessing(true);
+    setMessage(null);
+    try {
+      const result = await processFrameImage(lastFile, seeds);
+      applyProcessedResult(result, true);
+    } catch {
+      setMessage({ kind: "error", text: "تعذّرت معالجة الصورة. جرّب صورة أخرى." });
+    } finally {
+      setProcessing(false);
+      setPickingSeeds(false);
     }
   };
 
@@ -386,11 +413,43 @@ export default function AdminPage() {
               <div className="mt-4">
                 <button
                   type="button"
-                  onClick={() => { set("overlayImage", ""); if (fileRef.current) fileRef.current.value = ""; }}
+                  onClick={() => {
+                    set("overlayImage", "");
+                    setLastFile(null);
+                    setPickingSeeds(false);
+                    if (fileRef.current) fileRef.current.value = "";
+                  }}
                   className="mb-3 inline-flex items-center gap-1 text-xs font-bold text-danger"
                 >
                   <IconClose className="h-3.5 w-3.5" /> إزالة الصورة واستخدام الرسم
                 </button>
+
+                {lastFile && (
+                  <div className="mb-4">
+                    <button
+                      type="button"
+                      onClick={() => setPickingSeeds((v) => !v)}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-3.5 py-1.5 text-xs font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
+                    >
+                      <IconCamera className="h-3.5 w-3.5" />
+                      {pickingSeeds ? "إلغاء التحديد اليدوي" : "تحديد العدسات بالنقر"}
+                    </button>
+                    {pickingSeeds && (
+                      <>
+                        <p className="mt-2 text-xs leading-6 text-muted">
+                          انقر على مركز العدسة اليسرى (على الصورة) ثم مركز العدسة اليمنى. يُعاد
+                          تحليل الصورة من نقطتيك مباشرة — مفيد إذا فشل التحديد التلقائي.
+                        </p>
+                        <SeedPicker
+                          key={`${lastFile.name}-${lastFile.size}-${lastFile.lastModified}`}
+                          file={lastFile}
+                          onPick={handleManualSeeds}
+                        />
+                      </>
+                    )}
+                  </div>
+                )}
+
                 <div className="grid gap-3 sm:grid-cols-3">
                   <Field label={`مركز العدسة اليسرى: ${form.lensLeftX.toFixed(3)}`}>
                     <input type="range" min={0.05} max={0.45} step={0.005} value={form.lensLeftX} onChange={(e) => set("lensLeftX", Number(e.target.value))} className="w-full" />
@@ -550,6 +609,78 @@ export default function AdminPage() {
       </Container>
     </div>
   );
+}
+
+/**
+ * Click-to-seed fallback for when auto-detection misses. Shows the ORIGINAL
+ * uploaded photo (not the processed cutout) so clicks map to real pixel
+ * positions; two clicks (left lens, then right) are reported back as
+ * fractions of the photo's own width/height, which `processFrameImage`
+ * re-runs its whole pipeline from — growing the actual lens region from that
+ * exact point rather than only moving an alignment marker.
+ */
+function SeedPicker({ file, onPick }: { file: File; onPick: (seeds: ManualLensSeeds) => void }) {
+  // Keyed by the file on the caller side, so a new upload remounts this
+  // component with fresh state instead of needing an effect to reset `first`.
+  //
+  // The object URL is created AND revoked inside this one effect body,
+  // rather than created via useMemo and revoked in a separate effect: dev
+  // StrictMode runs an effect's mount -> cleanup -> mount again, and a
+  // useMemo does not re-run on that second mount, so a URL created outside
+  // the effect gets revoked by the first cleanup while still being the only
+  // reference in scope, and the image fails to load.
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- pairing create+revoke of a browser object URL to this effect's lifetime is the correct pattern here, not a data fetch to move into render.
+    setSrc(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  const [first, setFirst] = useState<{ x: number; y: number } | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  const handleClick = (e: React.MouseEvent<HTMLImageElement>) => {
+    const img = imgRef.current;
+    if (!img) return;
+    const rect = img.getBoundingClientRect();
+    const fx = clamp01((e.clientX - rect.left) / rect.width);
+    const fy = clamp01((e.clientY - rect.top) / rect.height);
+
+    if (!first) {
+      setFirst({ x: fx, y: fy });
+      return;
+    }
+    const point = { x: fx, y: fy };
+    const [leftPt, rightPt] = point.x < first.x ? [point, first] : [first, point];
+    onPick({ leftX: leftPt.x, leftY: leftPt.y, rightX: rightPt.x, rightY: rightPt.y });
+    setFirst(null);
+  };
+
+  if (!src) return null;
+  return (
+    <div className="relative mt-3 inline-block max-w-full overflow-hidden rounded-xl border border-line">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        ref={imgRef}
+        src={src}
+        alt=""
+        onClick={handleClick}
+        className="block max-h-72 max-w-full cursor-crosshair select-none"
+        draggable={false}
+      />
+      {first && (
+        <span
+          className="pointer-events-none absolute h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-accent bg-accent/40"
+          style={{ left: `${first.x * 100}%`, top: `${first.y * 100}%` }}
+        />
+      )}
+    </div>
+  );
+}
+
+function clamp01(v: number): number {
+  return Math.min(1, Math.max(0, v));
 }
 
 const inputCls = "field";
