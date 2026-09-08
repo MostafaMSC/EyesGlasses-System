@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Prepares an uploaded frame photo for use as a try-on overlay.
  *
  * Shop photos are almost always shot on a white background as JPG/PNG with no
@@ -6,7 +6,7 @@
  * entirely in the browser and:
  *
  *   1. removes the background (flood fill inwards from the edges),
- *   2. makes the enclosed lens areas glassy rather than opaque,
+ *   2. makes the lens openings glassy rather than opaque,
  *   3. crops away empty margins,
  *   4. locates the two lens centres so the overlay lands on the eyes.
  *
@@ -39,22 +39,54 @@ export interface ProcessedFrame {
   lensesDetected: boolean;
   /** True when the image was cropped down to the front rim only. */
   templesCropped: boolean;
+  /**
+   * Set when the background could not be confidently identified (textured,
+   * gradient, or non-uniform), so the cutout may still carry backdrop.
+   */
+  warning?: string;
   width: number;
   height: number;
 }
 
 const MAX_DIMENSION = 900;
-/** Colour distance (0-255 per channel, summed) treated as "same as background". */
-const BG_TOLERANCE = 78;
 /** Alpha given to lens interiors so eyes show through. */
 const LENS_ALPHA = 38;
 const OPAQUE_THRESHOLD = 30;
 
 /**
+ * Background clearing uses two tolerances rather than one fixed reference
+ * colour: a small STEP tolerance between neighbouring pixels lets the fill
+ * follow gentle gradients and soft shadows (a flat "must match the corner
+ * colour exactly" rule breaks on the first vignette), while a looser GLOBAL
+ * cap against the original sampled colour stops that gradual drift from
+ * eventually crossing all the way into the frame or a light-coloured lens.
+ */
+const BG_STEP_TOLERANCE = 26;
+const BG_GLOBAL_CAP = 130;
+/**
+ * Fraction of border pixels that must resemble the sampled background colour
+ * for the removal to be trusted. Textured or patterned backdrops (a printed
+ * backdrop, a wood table, a marbled surface) fail this by design — no flood
+ * fill can chroma-key something that was never a flat colour.
+ */
+const MIN_BORDER_COVERAGE = 0.65;
+
+/**
+ * Lens interiors are grown from a seed point using the SAME
+ * step/global-cap approach, but seeded from the lens's own colour rather
+ * than the backdrop's. This is what makes it work regardless of whether the
+ * lens happens to be light, dark, tinted or mid-photo reflecting a window —
+ * the old approach required the lens to accidentally match the background,
+ * which real glass essentially never does.
+ */
+const LENS_STEP_TOLERANCE = 30;
+const LENS_GLOBAL_CAP = 100;
+
+/**
  * Lens-centre span as a fraction of the frame front's own width. In the boxing
  * system the centres sit (lens width + bridge) apart inside a front of
  * (2x lens width + bridge + rim), which lands near 0.53 for every size of
- * frame â€” unlike the front's aspect ratio, which swings with lens depth.
+ * frame — unlike the front's aspect ratio, which swings with lens depth.
  */
 const FRONT_LENS_SPAN = 0.53;
 /**
@@ -100,109 +132,142 @@ function colorDistance(
   return Math.abs(data[i] - r) + Math.abs(data[i + 1] - g) + Math.abs(data[i + 2] - b);
 }
 
-/** Average of the four corner pixels â€” the most likely background colour. */
-function sampleBackground(data: Uint8ClampedArray, w: number, h: number) {
-  const corners = [0, (w - 1) * 4, (h - 1) * w * 4, ((h - 1) * w + (w - 1)) * 4];
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  for (const c of corners) {
-    r += data[c];
-    g += data[c + 1];
-    b += data[c + 2];
-  }
-  return { r: r / 4, g: g / 4, b: b / 4 };
+function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
 }
 
 /**
- * Flood fill inward from every border pixel, clearing anything that matches the
- * background. Working inward (rather than clearing every matching pixel
- * globally) is what preserves light details *inside* the frame.
+ * Background colour sampled as the per-channel median across many border
+ * pixels, not just the four corners — a corner landing on a logo, a prop, or
+ * a shadow used to throw the whole removal off by itself.
  */
-function clearBackground(data: Uint8ClampedArray, w: number, h: number): Uint8Array {
+function sampleBackground(data: Uint8ClampedArray, w: number, h: number) {
+  const rs: number[] = [];
+  const gs: number[] = [];
+  const bs: number[] = [];
+  const step = Math.max(1, Math.floor(Math.min(w, h) / 40));
+
+  const sample = (x: number, y: number) => {
+    const i = (y * w + x) * 4;
+    rs.push(data[i]);
+    gs.push(data[i + 1]);
+    bs.push(data[i + 2]);
+  };
+
+  for (let x = 0; x < w; x += step) {
+    sample(x, 0);
+    sample(x, h - 1);
+  }
+  for (let y = 0; y < h; y += step) {
+    sample(0, y);
+    sample(w - 1, y);
+  }
+
+  return { r: median(rs), g: median(gs), b: median(bs) };
+}
+
+/**
+ * Flood fill inward from every border pixel, clearing the background. Two
+ * tolerances make this hold up on real product photography instead of only
+ * flat-colour backdrops:
+ *
+ *   - STEP: the candidate pixel must be close to the neighbour that is
+ *     already-cleared next to it, so smooth gradients and soft shadows get
+ *     followed rather than stopping the fill dead at the first darker pixel.
+ *   - GLOBAL CAP: the candidate must still resemble the originally sampled
+ *     background colour overall, so that gradual drift can never tunnel all
+ *     the way into the frame or a light lens.
+ *
+ * `borderCoverage` reports how much of the image border actually resembled
+ * the sampled background — low coverage means the backdrop was never a
+ * removable flat colour (texture, a patterned surface, a photo prop) and the
+ * caller should say so rather than silently shipping a bad cutout.
+ */
+function clearBackground(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number
+): { outside: Uint8Array; borderCoverage: number } {
   const bg = sampleBackground(data, w, h);
   const outside = new Uint8Array(w * h);
   const stack: number[] = [];
+  let borderTotal = 0;
+  let borderMatched = 0;
 
-  const push = (x: number, y: number) => {
+  const seedBorder = (x: number, y: number) => {
+    borderTotal++;
+    const p = y * w + x;
+    if (colorDistance(data, p * 4, bg.r, bg.g, bg.b) > BG_GLOBAL_CAP) return;
+    borderMatched++;
+    if (outside[p]) return;
+    outside[p] = 1;
+    stack.push(p);
+  };
+
+  const tryPush = (x: number, y: number, refR: number, refG: number, refB: number) => {
     if (x < 0 || y < 0 || x >= w || y >= h) return;
     const p = y * w + x;
     if (outside[p]) return;
-    if (colorDistance(data, p * 4, bg.r, bg.g, bg.b) > BG_TOLERANCE) return;
+    if (colorDistance(data, p * 4, refR, refG, refB) > BG_STEP_TOLERANCE) return;
+    if (colorDistance(data, p * 4, bg.r, bg.g, bg.b) > BG_GLOBAL_CAP) return;
     outside[p] = 1;
     stack.push(p);
   };
 
   for (let x = 0; x < w; x++) {
-    push(x, 0);
-    push(x, h - 1);
+    seedBorder(x, 0);
+    seedBorder(x, h - 1);
   }
   for (let y = 0; y < h; y++) {
-    push(0, y);
-    push(w - 1, y);
+    seedBorder(0, y);
+    seedBorder(w - 1, y);
   }
 
   while (stack.length) {
     const p = stack.pop()!;
     const x = p % w;
     const y = (p / w) | 0;
-    push(x + 1, y);
-    push(x - 1, y);
-    push(x, y + 1);
-    push(x, y - 1);
+    const r = data[p * 4];
+    const g = data[p * 4 + 1];
+    const b = data[p * 4 + 2];
+    tryPush(x + 1, y, r, g, b);
+    tryPush(x - 1, y, r, g, b);
+    tryPush(x, y + 1, r, g, b);
+    tryPush(x, y - 1, r, g, b);
   }
 
   for (let p = 0; p < w * h; p++) {
     if (outside[p]) data[p * 4 + 3] = 0;
   }
-  return outside;
+
+  return { outside, borderCoverage: borderTotal > 0 ? borderMatched / borderTotal : 0 };
 }
 
 /**
- * Enclosed background-coloured regions. The two largest are the lens openings:
- * they become translucent glass and give us the alignment points. Every other
- * enclosed pocket (gaps around the hinges, sky showing between the temples and
- * the rim) is cleared completely â€” leaving those translucent puts pale ghost
- * shapes on the wearer's face.
+ * Clears every enclosed, still-background-coloured pocket (gaps around
+ * hinges, a sliver of backdrop between a temple and the rim). These are
+ * never the lenses — real lenses are handled separately by
+ * `growLensRegion`, seeded from their own colour rather than the
+ * background's — this pass only mops up incidental holes so they don't sit
+ * on the wearer's face as stray background-coloured patches.
  */
-function findLenses(
-  data: Uint8ClampedArray,
-  w: number,
-  h: number,
-  outside: Uint8Array
-): LensRegion[] {
+function clearIncidentalGaps(data: Uint8ClampedArray, w: number, h: number, outside: Uint8Array) {
   const bg = sampleBackground(data, w, h);
   const visited = new Uint8Array(w * h);
-  const regions: (LensRegion & { members: number[] })[] = [];
 
   for (let start = 0; start < w * h; start++) {
     if (visited[start] || outside[start]) continue;
-    if (colorDistance(data, start * 4, bg.r, bg.g, bg.b) > BG_TOLERANCE) continue;
+    if (colorDistance(data, start * 4, bg.r, bg.g, bg.b) > BG_GLOBAL_CAP) continue;
 
-    let area = 0;
-    let sumX = 0;
-    let sumY = 0;
-    let minX = w;
-    let maxX = 0;
-    let minY = h;
-    let maxY = 0;
-    const stack = [start];
+    const members: number[] = [start];
     visited[start] = 1;
-    const members: number[] = [];
+    const stack = [start];
 
     while (stack.length) {
       const p = stack.pop()!;
       const x = p % w;
       const y = (p / w) | 0;
-      area++;
-      sumX += x;
-      sumY += y;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-      members.push(p);
-
       const neighbours = [
         x + 1 < w ? p + 1 : -1,
         x - 1 >= 0 ? p - 1 : -1,
@@ -211,30 +276,132 @@ function findLenses(
       ];
       for (const n of neighbours) {
         if (n < 0 || visited[n] || outside[n]) continue;
-        if (colorDistance(data, n * 4, bg.r, bg.g, bg.b) > BG_TOLERANCE) continue;
+        if (colorDistance(data, n * 4, bg.r, bg.g, bg.b) > BG_GLOBAL_CAP) continue;
         visited[n] = 1;
         stack.push(n);
+        members.push(n);
       }
     }
 
-    // Ignore specks; keep anything big enough to be a lens or a real gap.
-    if (area > (w * h) / 800) {
-      regions.push({ cx: sumX / area, cy: sumY / area, area, minX, maxX, minY, maxY, members });
+    for (const p of members) data[p * 4 + 3] = 0;
+  }
+}
+
+/**
+ * Grows a lens region from a single seed point using the seed's OWN colour as
+ * the reference, not the background's. A real lens is glass-grey, blue-ish,
+ * tinted, or carries a bright reflection streak — essentially never the same
+ * shade as the backdrop — so this is what actually finds it, where matching
+ * against the background colour (the old approach) always failed and left
+ * the lens fully opaque at its photographed colour.
+ */
+function growLensRegion(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  outside: Uint8Array,
+  seedX: number,
+  seedY: number
+): { region: LensRegion; members: number[] } | null {
+  const sx = clamp(Math.round(seedX), 0, w - 1);
+  const sy = clamp(Math.round(seedY), 0, h - 1);
+  const start = sy * w + sx;
+  if (outside[start]) return null;
+
+  const seedR = data[start * 4];
+  const seedG = data[start * 4 + 1];
+  const seedB = data[start * 4 + 2];
+
+  const visited = new Uint8Array(w * h);
+  visited[start] = 1;
+  const stack = [start];
+  const members: number[] = [];
+  let area = 0;
+  let sumX = 0;
+  let sumY = 0;
+  let minX = w;
+  let maxX = 0;
+  let minY = h;
+  let maxY = 0;
+
+  while (stack.length) {
+    const p = stack.pop()!;
+    const x = p % w;
+    const y = (p / w) | 0;
+    area++;
+    sumX += x;
+    sumY += y;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    members.push(p);
+
+    const neighbours = [
+      x + 1 < w ? p + 1 : -1,
+      x - 1 >= 0 ? p - 1 : -1,
+      y + 1 < h ? p + w : -1,
+      y - 1 >= 0 ? p - w : -1,
+    ];
+    for (const n of neighbours) {
+      if (n < 0 || visited[n] || outside[n]) continue;
+      if (colorDistance(data, n * 4, data[p * 4], data[p * 4 + 1], data[p * 4 + 2]) > LENS_STEP_TOLERANCE)
+        continue;
+      if (colorDistance(data, n * 4, seedR, seedG, seedB) > LENS_GLOBAL_CAP) continue;
+      visited[n] = 1;
+      stack.push(n);
     }
   }
 
-  const bySize = [...regions].sort((a, b) => b.area - a.area);
-  const lenses = bySize.slice(0, 2);
-  const lensIds = new Set(lenses);
+  return { region: { cx: sumX / area, cy: sumY / area, area, minX, maxX, minY, maxY }, members };
+}
 
-  for (const region of regions) {
-    const alpha = lensIds.has(region) ? LENS_ALPHA : 0;
-    for (const p of region.members) data[p * 4 + 3] = alpha;
-  }
+/**
+ * Finds both lenses by growing outward from two seed points placed using the
+ * same front-on, centred assumption the rest of this file relies on (see
+ * FRONT_LENS_SPAN), then marks exactly the grown pixels — not their bounding
+ * box — as translucent glass.
+ */
+function detectAndMarkLenses(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  outside: Uint8Array,
+  content: { x: number; y: number; w: number; h: number }
+): LensRegion[] {
+  const seedY = content.y + content.h * 0.5;
+  const leftSeedX = content.x + content.w * (0.5 - FRONT_LENS_SPAN / 2);
+  const rightSeedX = content.x + content.w * (0.5 + FRONT_LENS_SPAN / 2);
 
-  return lenses
-    .sort((a, b) => a.cx - b.cx)
-    .map(({ cx, cy, area, minX, maxX, minY, maxY }) => ({ cx, cy, area, minX, maxX, minY, maxY }));
+  const left = growLensRegion(data, w, h, outside, leftSeedX, seedY);
+  const right = growLensRegion(data, w, h, outside, rightSeedX, seedY);
+  if (!left || !right) return [];
+
+  if (!isPlausibleLensPair(left.region, right.region)) return [];
+
+  for (const p of left.members) data[p * 4 + 3] = LENS_ALPHA;
+  for (const p of right.members) data[p * 4 + 3] = LENS_ALPHA;
+
+  return [left.region, right.region];
+}
+
+/**
+ * Do these two regions look like the left and right lens of one frame?
+ *
+ * A mismatched pair (glare splitting one lens in two, a temple gap grown
+ * instead of the lens) puts the measured lens centres somewhere that is not
+ * the eyes, which then shifts the whole frame sideways on the face.
+ */
+function isPlausibleLensPair(a: LensRegion, b: LensRegion): boolean {
+  const areaRatio = Math.min(a.area, b.area) / Math.max(a.area, b.area);
+  const heightA = a.maxY - a.minY;
+  const heightB = b.maxY - b.minY;
+  const meanHeight = (heightA + heightB) / 2;
+  if (meanHeight < 4) return false;
+
+  const heightRatio = Math.min(heightA, heightB) / Math.max(heightA, heightB);
+  const onOneLine = Math.abs(a.cy - b.cy) < meanHeight * 0.45;
+  return areaRatio > 0.35 && heightRatio > 0.45 && onOneLine;
 }
 
 /**
@@ -242,7 +409,7 @@ function findLenses(
  *
  * A frame is one connected object (plus, at most, a detached lens or nose
  * pad), so anything left over that is a fraction of the main body's size is
- * background the flood fill could not reach â€” it survives the crop and paints
+ * background the flood fill could not reach — it survives the crop and paints
  * stray marks across the wearer's face.
  */
 function dropDetachedSpecks(data: Uint8ClampedArray, w: number, h: number) {
@@ -285,27 +452,6 @@ function dropDetachedSpecks(data: Uint8ClampedArray, w: number, h: number) {
     const id = label[p];
     if (id >= 0 && areas[id] < minArea) data[p * 4 + 3] = 0;
   }
-}
-
-/**
- * Do these two regions look like the left and right lens of one frame?
- *
- * The largest two enclosed pockets are not always the lenses â€” glare can split
- * one lens in two, and the triangle between a splayed temple and the rim is
- * often bigger than the far lens on an angled shot. A mismatched pair puts the
- * measured lens centres somewhere that is not the eyes, which then shifts the
- * whole frame sideways on the face.
- */
-function isPlausibleLensPair(a: LensRegion, b: LensRegion): boolean {
-  const areaRatio = Math.min(a.area, b.area) / Math.max(a.area, b.area);
-  const heightA = a.maxY - a.minY;
-  const heightB = b.maxY - b.minY;
-  const meanHeight = (heightA + heightB) / 2;
-  if (meanHeight < 4) return false;
-
-  const heightRatio = Math.min(heightA, heightB) / Math.max(heightA, heightB);
-  const onOneLine = Math.abs(a.cy - b.cy) < meanHeight * 0.45;
-  return areaRatio > 0.4 && heightRatio > 0.5 && onOneLine;
 }
 
 /**
@@ -459,7 +605,7 @@ function findTransparentHoles(data: Uint8ClampedArray, w: number, h: number): Le
  * Fallback temple removal when the lens openings can't be found (printed
  * logos and etched model numbers on the lens break the flood fill).
  *
- * The front of a frame is tall â€” a full lens height per column. Temple arms
+ * The front of a frame is tall — a full lens height per column. Temple arms
  * are thin bars, so their columns are short. Keeping only the columns that
  * reach a good fraction of the tallest column isolates the front.
  */
@@ -599,14 +745,26 @@ export async function processFrameImage(file: File): Promise<ProcessedFrame> {
   }
 
   let lenses: LensRegion[] = [];
+  let warning: string | undefined;
+
   if (alreadyTransparent) {
     // Already has an alpha channel: the lens openings are the enclosed
-    // transparent regions. This still needs doing â€” the temple arms have to
+    // transparent regions. This still needs doing — the temple arms have to
     // be cropped off regardless of how the file arrived.
     lenses = findTransparentHoles(data, w, h);
   } else {
-    const outside = clearBackground(data, w, h);
-    lenses = findLenses(data, w, h, outside);
+    const { outside, borderCoverage } = clearBackground(data, w, h);
+    if (borderCoverage < MIN_BORDER_COVERAGE) {
+      warning =
+        "الخلفية غير موحّدة (بها نقوش أو تدرّج قوي) فلم تُزَل بالكامل تلقائياً — التقط الصورة على خلفية بيضاء بسيطة لأفضل نتيجة.";
+    }
+    clearIncidentalGaps(data, w, h, outside);
+    // Seeded from the front-on, centred assumption this file relies on
+    // throughout — see FRONT_LENS_SPAN — using the RAW bounding box (before
+    // any lens alpha is applied) so the seeds land inside the still-opaque
+    // lens interiors.
+    const rawContent = boundingBox(data, w, h);
+    lenses = detectAndMarkLenses(data, w, h, outside, rawContent);
     dropDetachedSpecks(data, w, h);
     featherAlpha(data, w, h);
   }
@@ -640,7 +798,7 @@ export async function processFrameImage(file: File): Promise<ProcessedFrame> {
 
   // Detection failed or produced nonsense (angled photos, logos printed on the
   // lens). Fall back to a profile-based crop and neutral geometry rather than
-  // trusting a bad measurement â€” a too-small lens span divides into an
+  // trusting a bad measurement — a too-small lens span divides into an
   // enormous on-screen frame.
   if (!geometry) {
     const crop = columnProfileCrop(data, w, h, contentBox);
@@ -676,6 +834,7 @@ export async function processFrameImage(file: File): Promise<ProcessedFrame> {
     alreadyTransparent,
     lensesDetected,
     templesCropped: lensesDetected && box.w < contentBox.w - 2,
+    warning,
     width: box.w,
     height: box.h,
   };

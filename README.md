@@ -42,6 +42,13 @@ If automatic lens detection fails (you'll get an amber warning), the three lens
 sliders let you place them by hand. The preview sits on a checkerboard so you
 can confirm the background really is transparent.
 
+Lens detection is seeded from the lens's own colour, not the backdrop's — real
+glass is glassy-grey/blue and reflective, never the exact page-background
+colour, so it no longer needs to match it. If the *backdrop* itself isn't a
+plain, fairly uniform colour (a patterned surface, strong gradient, a busy
+scene), you'll get a different amber warning saying so — reshoot on a plain
+background rather than trusting the cutout.
+
 **Important:** admin-added frames are stored in that browser's `localStorage`.
 That means:
 
