@@ -38,16 +38,24 @@ background**. On upload the app automatically (all in the browser,
 The only real requirement is that the photo is **shot straight on**. A 3/4
 angled product shot can never sit correctly on a face.
 
-If automatic lens detection fails (you'll get an amber warning), the three lens
-sliders let you place them by hand. The preview sits on a checkerboard so you
-can confirm the background really is transparent.
+If automatic lens detection fails (you'll get an amber warning), press
+**تحديد العدسات بالنقر** and click the two lens centres directly on your
+original photo — the pipeline re-runs from those exact points instead of a
+guess, which fixes it in one click. The three lens sliders below are also
+still there for hand-tuning the alignment afterwards. The preview sits on a
+checkerboard so you can confirm the background really is transparent.
 
-Lens detection is seeded from the lens's own colour, not the backdrop's — real
-glass is glassy-grey/blue and reflective, never the exact page-background
-colour, so it no longer needs to match it. If the *backdrop* itself isn't a
-plain, fairly uniform colour (a patterned surface, strong gradient, a busy
-scene), you'll get a different amber warning saying so — reshoot on a plain
-background rather than trusting the cutout.
+Lens detection is seeded from the lens's own colour, in CIELAB space, not the
+backdrop's — real glass is glassy-grey/blue and reflective, never the exact
+page-background colour, so it no longer needs to match it. A Sobel edge map
+stops both background removal and lens growth from crossing a strong
+structural edge (a rim), even where the rim's colour alone would be close
+enough to fool it. The background tolerance itself isn't a fixed number —
+it's derived per photo with Otsu's method from that image's own
+distance-from-background histogram. If the *backdrop* still isn't a plain,
+fairly uniform colour (a patterned surface, strong gradient, a busy scene),
+you'll get a different amber warning saying so — reshoot on a plain
+background, or click-to-seed the lenses instead of trusting the cutout.
 
 **Important:** admin-added frames are stored in that browser's `localStorage`.
 That means:
