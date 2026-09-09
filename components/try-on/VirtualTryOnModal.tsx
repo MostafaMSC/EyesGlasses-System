@@ -23,6 +23,14 @@ import { Button } from "@/components/ui/Button";
 type PermissionState = "idle" | "requesting" | "granted" | "denied" | "unavailable" | "unsupported";
 type FaceState = "searching" | "tracking" | "multiple";
 
+/**
+ * A single frame with zero detected faces (motion blur, a hand crossing the
+ * face, brief occlusion by the glasses already being tried on) is common and
+ * shouldn't make the overlay vanish and snap back — that reads as jitter.
+ * Only treat tracking as truly lost after it's been missing this long.
+ */
+const NO_FACE_GRACE_MS = 400;
+
 export function VirtualTryOnModal() {
   const { tryOnProductId, closeTryOn, setTryOnProductId } = useShopUI();
   const { getById } = useProductStore();
@@ -38,6 +46,7 @@ export function VirtualTryOnModal() {
   const streamRef = useRef<MediaStream | null>(null);
   const smootherRef = useRef(new FacePoseSmoother());
   const pitchCalibratorRef = useRef(new PitchCalibrator());
+  const lastFaceSeenAtRef = useRef<number | null>(null);
   const productRef = useRef(product);
   const [stageRef, stageSize] = useElementSize<HTMLDivElement>();
   const stageSizeRef = useRef(stageSize);
@@ -89,6 +98,7 @@ export function VirtualTryOnModal() {
       if (videoRef.current) videoRef.current.srcObject = null;
       smootherRef.current.reset();
       pitchCalibratorRef.current.reset();
+      lastFaceSeenAtRef.current = null;
       queueMicrotask(() => {
         setPermission("idle");
         setCaptured(null);
@@ -120,10 +130,16 @@ export function VirtualTryOnModal() {
         const faces = (result?.faceLandmarks ?? []) as NormalizedPoint[][];
 
         if (faces.length === 0) {
-          setFaceState("searching");
-          smootherRef.current.next(null, now);
-          setPlacement(null);
+          const lastSeen = lastFaceSeenAtRef.current;
+          if (lastSeen === null || now - lastSeen >= NO_FACE_GRACE_MS) {
+            // Genuinely lost, not just a dropped frame — clear and reset.
+            setFaceState("searching");
+            smootherRef.current.next(null, now);
+            setPlacement(null);
+          }
+          // Else: within the grace window, hold the last placement as-is.
         } else {
+          lastFaceSeenAtRef.current = now;
           setFaceState(faces.length > 1 ? "multiple" : "tracking");
           const rawPose = computeFacePose(
             faces[0],

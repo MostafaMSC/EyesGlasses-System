@@ -111,12 +111,18 @@ export class PitchCalibrator {
 
   /** Returns pitch in degrees for the given eye-line ratio. */
   update(eyeLineRatio: number, yaw: number, roll: number): number {
-    if (this.baseline === null) {
-      this.baseline = eyeLineRatio;
-      return 0;
-    }
     const isFrontal =
       Math.abs(yaw) < CALIBRATION_YAW_LIMIT && Math.abs(roll) < CALIBRATION_ROLL_LIMIT;
+
+    if (this.baseline === null) {
+      // Locking onto whatever the very first frame looks like is risky: the
+      // camera often opens before the user has settled in front of it, so
+      // that frame can be off-angle and would permanently skew "level" until
+      // the slow drift below barely nudges it back. Wait for a frontal frame
+      // to set the baseline; report no tilt in the meantime.
+      if (isFrontal) this.baseline = eyeLineRatio;
+      return 0;
+    }
     if (isFrontal) {
       // Drift slowly toward the current pose so the baseline tracks the
       // user's resting position without absorbing deliberate nods.
@@ -232,8 +238,47 @@ function scalePoint(p: Vec2 | null, videoWidth: number, videoHeight: number): Ve
 type PoseChannel = "anchorX" | "anchorY" | "width" | "roll" | "yaw" | "pitch";
 
 /**
+ * How far a single frame's raw reading may plausibly move from the last
+ * accepted one. A real head can't teleport between two consecutive frames;
+ * a jump past these limits is almost always a bad detection (partial
+ * occlusion, motion blur, an already-worn pair of glasses confusing the
+ * mesh) rather than genuine motion.
+ */
+const MAX_ANCHOR_JUMP_TO_WIDTH_RATIO = 0.6;
+const MIN_WIDTH_JUMP_RATIO = 0.55;
+const MAX_WIDTH_JUMP_RATIO = 1.8;
+const MAX_ROTATION_JUMP_DEG = 40;
+/**
+ * If every frame keeps getting rejected for this long, it's more likely a
+ * genuinely fast/large motion than sustained noise — stop holding and accept
+ * the new reading so tracking doesn't get stuck.
+ */
+const OUTLIER_HOLD_LIMIT_MS = 250;
+
+function isImplausibleJump(prev: FacePose, next: FacePose): boolean {
+  const dAnchor = Math.hypot(next.anchorX - prev.anchorX, next.anchorY - prev.anchorY);
+  if (dAnchor > prev.width * MAX_ANCHOR_JUMP_TO_WIDTH_RATIO) return true;
+
+  const widthRatio = next.width / prev.width;
+  if (widthRatio < MIN_WIDTH_JUMP_RATIO || widthRatio > MAX_WIDTH_JUMP_RATIO) return true;
+
+  if (
+    Math.abs(next.roll - prev.roll) > MAX_ROTATION_JUMP_DEG ||
+    Math.abs(next.yaw - prev.yaw) > MAX_ROTATION_JUMP_DEG ||
+    Math.abs(next.pitch - prev.pitch) > MAX_ROTATION_JUMP_DEG
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Smooths pose across frames. Position and size get tighter smoothing than
- * rotation, which is noisier and matters less at small magnitudes.
+ * rotation, which is noisier and matters less at small magnitudes. Also
+ * rejects single-frame outliers (see `isImplausibleJump`) so one bad
+ * detection doesn't yank the overlay before the filter has a chance to
+ * smooth it out.
  */
 export class FacePoseSmoother {
   private smoother = new ChannelSmoother<PoseChannel>(
@@ -248,17 +293,37 @@ export class FacePoseSmoother {
     { minCutoff: 1.2, beta: 0.05 }
   );
 
+  private lastOutput: FacePose | null = null;
+  private outlierStreakStart: number | null = null;
+
   reset() {
     this.smoother.reset();
+    this.lastOutput = null;
+    this.outlierStreakStart = null;
   }
 
   next(pose: FacePose | null, timestampMs: number): FacePose | null {
     if (!pose) {
       this.smoother.reset();
+      this.lastOutput = null;
+      this.outlierStreakStart = null;
       return null;
     }
+
+    if (this.lastOutput && isImplausibleJump(this.lastOutput, pose)) {
+      if (this.outlierStreakStart === null) this.outlierStreakStart = timestampMs;
+      if (timestampMs - this.outlierStreakStart < OUTLIER_HOLD_LIMIT_MS) {
+        // Hold the last good pose rather than feed a bad frame into the
+        // filter — otherwise its velocity estimate spikes and it opens up
+        // to track the outlier instead of rejecting it.
+        return this.lastOutput;
+      }
+      // Rejected for too long: treat it as real motion and let it through.
+    }
+    this.outlierStreakStart = null;
+
     const width = this.smoother.smooth("width", pose.width, timestampMs);
-    return {
+    const smoothed: FacePose = {
       anchorX: this.smoother.smooth("anchorX", pose.anchorX, timestampMs),
       anchorY: this.smoother.smooth("anchorY", pose.anchorY, timestampMs),
       width,
@@ -267,5 +332,7 @@ export class FacePoseSmoother {
       yaw: this.smoother.smooth("yaw", pose.yaw, timestampMs),
       pitch: this.smoother.smooth("pitch", pose.pitch, timestampMs),
     };
+    this.lastOutput = smoothed;
+    return smoothed;
   }
 }
