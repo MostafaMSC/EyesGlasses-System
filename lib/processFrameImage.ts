@@ -61,6 +61,38 @@ export interface ProcessedFrame {
   height: number;
 }
 
+export interface FrameBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * The background-removed photo *before* the temple arms are cropped off —
+ * everything `processFrameImage` needs to pick a crop is already computed
+ * (lens positions, the auto-suggested front-rim box, the outer content
+ * bounds), but the crop itself hasn't been applied yet. Kept around so a
+ * human can pick the crop instead when automatic detection gets it wrong —
+ * see `finalizeFrame`.
+ */
+export interface WorkingFrame {
+  dataUrl: string;
+  width: number;
+  height: number;
+  /** Automatically suggested crop (front-rim box, or a profile-based guess). Use as the starting rectangle for a manual trim. */
+  autoBox: FrameBox;
+  /** Full opaque content bounds — a crop box should never need to go outside this. */
+  contentBox: FrameBox;
+  /** Detected lens centres, in this image's own pixel coordinates. Null when detection failed. */
+  lensCenters: { left: { x: number; y: number }; right: { x: number; y: number } } | null;
+  /** Geometry already computed for `autoBox`, reused as-is when finalizing with that same box. */
+  autoGeometry: FrameGeometry;
+  alreadyTransparent: boolean;
+  lensesDetected: boolean;
+  warning?: string;
+}
+
 const MAX_DIMENSION = 900;
 /** Alpha given to lens interiors so eyes show through. */
 const LENS_ALPHA = 38;
@@ -81,6 +113,15 @@ function loadImageFromFile(file: File): Promise<HTMLImageElement> {
       reject(new Error("Could not read that image file."));
     };
     img.src = url;
+  });
+}
+
+function loadImageFromDataUrl(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Could not read the working image."));
+    img.src = dataUrl;
   });
 }
 
@@ -501,6 +542,25 @@ function growLensRegion(
 const FRONT_LENS_SPAN = 0.53;
 
 /**
+ * A real lens opening is roughly as tall as it is wide, never a thin bar. On
+ * a thin-metal frame the rim can carry almost no luminance edge against a
+ * bright reflection, so the colour-guided fill in `growLensRegion` can leak
+ * straight through it into the hinge and the start of the temple arm — the
+ * grown "lens" then measures far wider than tall. That inflates whatever
+ * uses its bounding box (the front-rim crop, in particular), letting the
+ * temple survive into the final image. This is checked regardless of
+ * whether the seed was automatic or a human's click: a leak is an artifact
+ * of the fill, not of who pointed at the starting pixel.
+ */
+const MAX_LENS_REGION_ASPECT = 2.4;
+
+function isLensShaped(r: LensRegion): boolean {
+  const width = r.maxX - r.minX;
+  const height = r.maxY - r.minY;
+  return height > 0 && width / height <= MAX_LENS_REGION_ASPECT;
+}
+
+/**
  * Finds both lenses by growing outward from two seed points, then marks
  * exactly the grown pixels — not their bounding box — as translucent glass.
  * Seeds are either the caller's own click points (trusted outright, no
@@ -521,6 +581,7 @@ function detectAndMarkLenses(
   const left = growLensRegion(data, w, h, outside, lab, edge, seeds.left.x, seeds.left.y);
   const right = growLensRegion(data, w, h, outside, lab, edge, seeds.right.x, seeds.right.y);
   if (!left || !right) return [];
+  if (!isLensShaped(left.region) || !isLensShaped(right.region)) return [];
   if (!trustSeeds && !isPlausibleLensPair(left.region, right.region)) return [];
 
   for (const p of left.members) data[p * 4 + 3] = LENS_ALPHA;
@@ -929,7 +990,8 @@ function isPlausibleGeometry(g: FrameGeometry): boolean {
     g.lensY >= 0.2 &&
     g.lensY <= 0.8 &&
     Number.isFinite(g.aspect) &&
-    g.aspect >= 1.2 // a frame front is much wider than it is tall
+    g.aspect >= 1.2 && // a frame front is much wider than it is tall...
+    g.aspect <= WIDEST_FRONT_ASPECT // ...but not wider than any real front gets, which is what a leaked crop (arms included) looks like
   );
 }
 
@@ -1033,7 +1095,14 @@ async function removeBackground(
   }
 }
 
-export async function processFrameImage(file: File, manualSeeds?: ManualLensSeeds): Promise<ProcessedFrame> {
+/**
+ * Runs background removal and lens detection, but stops short of cropping
+ * off the temple arms — that step happens in `assembleFinal`, driven by
+ * either `box` computed here or a box a human picked. Splitting the pipeline
+ * here is what lets a manual crop reuse everything already computed (lens
+ * positions, content bounds) instead of re-running detection from scratch.
+ */
+export async function prepareWorkingFrame(file: File, manualSeeds?: ManualLensSeeds): Promise<WorkingFrame> {
   const img = await loadImageFromFile(file);
 
   const scale = Math.min(1, MAX_DIMENSION / Math.max(img.width, img.height));
@@ -1121,8 +1190,14 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
   let box = contentBox;
   let geometry: FrameGeometry | null = null;
   let lensesDetected = false;
+  let lensCenters: WorkingFrame["lensCenters"] = null;
 
-  if (lenses.length === 2 && isPlausibleLensPair(lenses[0], lenses[1])) {
+  // A human's two clicks already say "these are the lenses" — re-applying
+  // the auto-pairing plausibility gate on top would let a merely-asymmetric
+  // real pair (glare shrinking one lens, say) get silently discarded despite
+  // being exactly what was pointed at. `isLensShaped`, applied earlier inside
+  // `detectAndMarkLenses`, still guards against a leaked/malformed region.
+  if (lenses.length === 2 && (manualSeeds || isPlausibleLensPair(lenses[0], lenses[1]))) {
     const candidateBox = frontRimBox(lenses, contentBox);
     const candidate: FrameGeometry = {
       aspect: candidateBox.w / candidateBox.h,
@@ -1134,6 +1209,10 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
       box = candidateBox;
       geometry = candidate;
       lensesDetected = true;
+      lensCenters = {
+        left: { x: lenses[0].cx, y: lenses[0].cy },
+        right: { x: lenses[1].cx, y: lenses[1].cy },
+      };
     }
   }
 
@@ -1162,17 +1241,70 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
     geometry = { aspect, lensLeftX: 0.5 - span / 2, lensRightX: 0.5 + span / 2, lensY: 0.5 };
   }
 
-  // Re-tighten within `box` (frontRimBox's own padding can be more generous
+  return {
+    dataUrl: canvas.toDataURL("image/png"),
+    width: w,
+    height: h,
+    autoBox: box,
+    contentBox,
+    lensCenters,
+    autoGeometry: geometry,
+    alreadyTransparent,
+    lensesDetected,
+    warning,
+  };
+}
+
+const sameBox = (a: FrameBox, b: FrameBox) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+
+/** Geometry for an arbitrary crop box, reusing real lens centres when known. */
+function geometryForBox(working: WorkingFrame, box: FrameBox): FrameGeometry {
+  if (working.lensCenters) {
+    return {
+      aspect: box.w / box.h,
+      lensLeftX: (working.lensCenters.left.x - box.x) / box.w,
+      lensRightX: (working.lensCenters.right.x - box.x) / box.w,
+      lensY: ((working.lensCenters.left.y + working.lensCenters.right.y) / 2 - box.y) / box.h,
+    };
+  }
+  if (sameBox(box, working.autoBox)) return working.autoGeometry;
+  // No detected centres and this isn't the box detection already reasoned
+  // about: assume a manual crop was trimmed tight to the front already, so
+  // the ordinary centred guess is a reasonable estimate.
+  const span = clamp(FRONT_LENS_SPAN, 0.18, 0.6);
+  return { aspect: box.w / box.h, lensLeftX: 0.5 - span / 2, lensRightX: 0.5 + span / 2, lensY: 0.5 };
+}
+
+/** Crops a working frame to `box`, fits it into the shared final canvas, and re-expresses lens geometry against it. */
+export async function finalizeFrame(working: WorkingFrame, box: FrameBox): Promise<ProcessedFrame> {
+  const img = await loadImageFromDataUrl(working.dataUrl);
+  const canvas = document.createElement("canvas");
+  canvas.width = working.width;
+  canvas.height = working.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas is unavailable in this browser.");
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, working.width, working.height).data;
+
+  const clampedBox: FrameBox = {
+    x: clamp(box.x, 0, working.width - 1),
+    y: clamp(box.y, 0, working.height - 1),
+    w: clamp(box.w, 1, working.width - clamp(box.x, 0, working.width - 1)),
+    h: clamp(box.h, 1, working.height - clamp(box.y, 0, working.height - 1)),
+  };
+  const geometry = geometryForBox(working, clampedBox);
+
+  // Re-tighten within the box (frontRimBox's own padding can be more generous
   // than a given frame actually needs — a thin-rimmed frame doesn't need a
   // browline's full top margin), then pad that by a fixed fraction — not a
   // lens-relative one — and fit it into the one shared canvas size.
-  const tight = tightBoxWithin(data, w, box);
+  const tight = tightBoxWithin(data, working.width, clampedBox);
   const padX = Math.round(tight.w * FINAL_PADDING_FRACTION);
   const padY = Math.round(tight.h * FINAL_PADDING_FRACTION);
-  const paddedX0 = clamp(tight.x - padX, box.x, box.x + box.w);
-  const paddedY0 = clamp(tight.y - padY, box.y, box.y + box.h);
-  const paddedX1 = clamp(tight.x + tight.w + padX, box.x, box.x + box.w);
-  const paddedY1 = clamp(tight.y + tight.h + padY, box.y, box.y + box.h);
+  const paddedX0 = clamp(tight.x - padX, clampedBox.x, clampedBox.x + clampedBox.w);
+  const paddedY0 = clamp(tight.y - padY, clampedBox.y, clampedBox.y + clampedBox.h);
+  const paddedX1 = clamp(tight.x + tight.w + padX, clampedBox.x, clampedBox.x + clampedBox.w);
+  const paddedY1 = clamp(tight.y + tight.h + padY, clampedBox.y, clampedBox.y + clampedBox.h);
   const padded = {
     x: paddedX0,
     y: paddedY0,
@@ -1194,11 +1326,10 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
   outCtx.drawImage(canvas, padded.x, padded.y, padded.w, padded.h, offsetX, offsetY, drawW, drawH);
 
   // Re-express the lens geometry against the new fixed canvas: the fractions
-  // above are relative to `box`, so convert to absolute pixels in the
-  // original working canvas first, then apply this same crop + scale +
-  // centring.
-  const toFinalX = (fracOfBox: number) => (box.x + fracOfBox * box.w - padded.x) * fitScale + offsetX;
-  const toFinalY = (fracOfBox: number) => (box.y + fracOfBox * box.h - padded.y) * fitScale + offsetY;
+  // above are relative to the chosen box, so convert to absolute pixels in
+  // the working canvas first, then apply this same crop + scale + centring.
+  const toFinalX = (fracOfBox: number) => (clampedBox.x + fracOfBox * clampedBox.w - padded.x) * fitScale + offsetX;
+  const toFinalY = (fracOfBox: number) => (clampedBox.y + fracOfBox * clampedBox.h - padded.y) * fitScale + offsetY;
   const finalGeometry: FrameGeometry = {
     aspect: FINAL_CANVAS_WIDTH / FINAL_CANVAS_HEIGHT,
     lensLeftX: toFinalX(geometry.lensLeftX) / FINAL_CANVAS_WIDTH,
@@ -1209,11 +1340,17 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
   return {
     dataUrl: out.toDataURL("image/png"),
     geometry: finalGeometry,
-    alreadyTransparent,
-    lensesDetected,
-    templesCropped: lensesDetected && box.w < contentBox.w - 2,
-    warning,
+    alreadyTransparent: working.alreadyTransparent,
+    lensesDetected: working.lensesDetected,
+    templesCropped: clampedBox.w < working.contentBox.w - 2 || clampedBox.h < working.contentBox.h - 2,
+    warning: working.warning,
     width: FINAL_CANVAS_WIDTH,
     height: FINAL_CANVAS_HEIGHT,
   };
+}
+
+/** Runs the full automatic pipeline: prepare, then crop to the auto-suggested box. */
+export async function processFrameImage(file: File, manualSeeds?: ManualLensSeeds): Promise<ProcessedFrame> {
+  const working = await prepareWorkingFrame(file, manualSeeds);
+  return finalizeFrame(working, working.autoBox);
 }

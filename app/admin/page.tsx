@@ -5,7 +5,14 @@ import Link from "next/link";
 import { frameSvgDataUri, type FrameShape } from "@/lib/frameShapes";
 import { getProductVisualSrc, type Availability, type Category, type Product } from "@/data/products";
 import { newProductId, slugify, useProductStore } from "@/lib/productStore";
-import { processFrameImage, type ManualLensSeeds, type ProcessedFrame } from "@/lib/processFrameImage";
+import {
+  prepareWorkingFrame,
+  finalizeFrame,
+  type ManualLensSeeds,
+  type ProcessedFrame,
+  type WorkingFrame,
+  type FrameBox,
+} from "@/lib/processFrameImage";
 import { useShopUI } from "@/context/ShopUIContext";
 import { formatPrice } from "@/lib/format";
 import { Container } from "@/components/ui/Container";
@@ -102,6 +109,8 @@ export default function AdminPage() {
   const [processing, setProcessing] = useState(false);
   const [lastFile, setLastFile] = useState<File | null>(null);
   const [pickingSeeds, setPickingSeeds] = useState(false);
+  const [workingFrame, setWorkingFrame] = useState<WorkingFrame | null>(null);
+  const [croppingArms, setCroppingArms] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
@@ -185,7 +194,7 @@ export default function AdminPage() {
     }
   };
 
-  const applyProcessedResult = (result: ProcessedFrame, manual: boolean) => {
+  const applyProcessedResult = (result: ProcessedFrame, source: "auto" | "seeds" | "crop") => {
     setForm((f) => ({
       ...f,
       overlayImage: result.dataUrl,
@@ -203,8 +212,20 @@ export default function AdminPage() {
     if (result.templesCropped) done.push("قصّ الأذرع الجانبية");
     if (result.lensesDetected) done.push("تحديد مواضع العدسات");
 
-    if (manual) {
-      setMessage({ kind: "ok", text: "تم تحديد العدسات من النقرتين." });
+    if (source === "crop") {
+      setMessage({ kind: "ok", text: "تم قصّ الإطار يدوياً." });
+    } else if (source === "seeds") {
+      // Even a human's two clicks can still fail the shape/geometry sanity
+      // checks (a truly ambiguous photo) — say so instead of always claiming
+      // success, or the admin has no reason to try the crop tool next.
+      setMessage(
+        result.lensesDetected
+          ? { kind: "ok", text: "تم تحديد العدسات من النقرتين." }
+          : {
+              kind: "warn",
+              text: `تمت ${done.join("، و")}، لكن لم يتم تحديد العدسات حتى من نقطتيك. جرّب "قص الأذرع يدوياً" بالأسفل.`,
+            }
+      );
     } else if (result.warning) {
       setMessage({ kind: "warn", text: result.warning });
     } else if (result.lensesDetected) {
@@ -212,7 +233,7 @@ export default function AdminPage() {
     } else {
       setMessage({
         kind: "warn",
-        text: `تمت ${done.join("، و")}، لكن لم يتم تحديد العدسات تلقائياً. اضغط "تحديد العدسات بالنقر" بالأسفل، أو عدّل الأشرطة يدوياً.`,
+        text: `تمت ${done.join("، و")}، لكن لم يتم تحديد العدسات تلقائياً. اضغط "تحديد العدسات بالنقر" أو "قص الأذرع يدوياً" بالأسفل، أو عدّل الأشرطة يدوياً.`,
       });
     }
   };
@@ -224,11 +245,14 @@ export default function AdminPage() {
     }
     setLastFile(file);
     setPickingSeeds(false);
+    setCroppingArms(false);
     setProcessing(true);
     setMessage(null);
     try {
-      const result = await processFrameImage(file);
-      applyProcessedResult(result, false);
+      const working = await prepareWorkingFrame(file);
+      setWorkingFrame(working);
+      const result = await finalizeFrame(working, working.autoBox);
+      applyProcessedResult(result, "auto");
     } catch {
       setMessage({ kind: "error", text: "تعذّرت معالجة الصورة. جرّب صورة أخرى." });
     } finally {
@@ -241,13 +265,30 @@ export default function AdminPage() {
     setProcessing(true);
     setMessage(null);
     try {
-      const result = await processFrameImage(lastFile, seeds);
-      applyProcessedResult(result, true);
+      const working = await prepareWorkingFrame(lastFile, seeds);
+      setWorkingFrame(working);
+      const result = await finalizeFrame(working, working.autoBox);
+      applyProcessedResult(result, "seeds");
     } catch {
       setMessage({ kind: "error", text: "تعذّرت معالجة الصورة. جرّب صورة أخرى." });
     } finally {
       setProcessing(false);
       setPickingSeeds(false);
+    }
+  };
+
+  const handleManualCrop = async (box: FrameBox) => {
+    if (!workingFrame) return;
+    setProcessing(true);
+    setMessage(null);
+    try {
+      const result = await finalizeFrame(workingFrame, box);
+      applyProcessedResult(result, "crop");
+    } catch {
+      setMessage({ kind: "error", text: "تعذّر تطبيق القص. جرّب مرة أخرى." });
+    } finally {
+      setProcessing(false);
+      setCroppingArms(false);
     }
   };
 
@@ -416,7 +457,9 @@ export default function AdminPage() {
                   onClick={() => {
                     set("overlayImage", "");
                     setLastFile(null);
+                    setWorkingFrame(null);
                     setPickingSeeds(false);
+                    setCroppingArms(false);
                     if (fileRef.current) fileRef.current.value = "";
                   }}
                   className="mb-3 inline-flex items-center gap-1 text-xs font-bold text-danger"
@@ -426,14 +469,31 @@ export default function AdminPage() {
 
                 {lastFile && (
                   <div className="mb-4">
-                    <button
-                      type="button"
-                      onClick={() => setPickingSeeds((v) => !v)}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-3.5 py-1.5 text-xs font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
-                    >
-                      <IconCamera className="h-3.5 w-3.5" />
-                      {pickingSeeds ? "إلغاء التحديد اليدوي" : "تحديد العدسات بالنقر"}
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPickingSeeds((v) => !v);
+                          setCroppingArms(false);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-3.5 py-1.5 text-xs font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
+                      >
+                        <IconCamera className="h-3.5 w-3.5" />
+                        {pickingSeeds ? "إلغاء التحديد اليدوي" : "تحديد العدسات بالنقر"}
+                      </button>
+                      {workingFrame && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCroppingArms((v) => !v);
+                            setPickingSeeds(false);
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-3.5 py-1.5 text-xs font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
+                        >
+                          {croppingArms ? "إلغاء القص اليدوي" : "قص الأذرع يدوياً"}
+                        </button>
+                      )}
+                    </div>
                     {pickingSeeds && (
                       <>
                         <p className="mt-2 text-xs leading-6 text-muted">
@@ -445,6 +505,15 @@ export default function AdminPage() {
                           file={lastFile}
                           onPick={handleManualSeeds}
                         />
+                      </>
+                    )}
+                    {croppingArms && workingFrame && (
+                      <>
+                        <p className="mt-2 text-xs leading-6 text-muted">
+                          حرّك المربع أو اسحب زواياه ليحيط بواجهة الإطار (العدستين والجسر) فقط،
+                          مستبعداً الأذرع الجانبية بالكامل، ثم اضغط &quot;تطبيق القص&quot;.
+                        </p>
+                        <FrameCropTool working={workingFrame} onApply={handleManualCrop} />
                       </>
                     )}
                   </div>
@@ -679,8 +748,164 @@ function SeedPicker({ file, onPick }: { file: File; onPick: (seeds: ManualLensSe
   );
 }
 
+type CropHandle = "move" | "nw" | "ne" | "sw" | "se";
+/** Crop rectangle as fractions (0..1) of the working image — resolution-independent, so the rendered display size doesn't matter. */
+interface CropFrac {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+const MIN_CROP_FRACTION = 0.08;
+
+/**
+ * Manual trim for when automatic temple-arm removal gets it wrong. Shows the
+ * background-removed photo BEFORE the arms are cropped off (`working.dataUrl`,
+ * full width) with a draggable/resizable box the admin positions around just
+ * the front rim; `onApply` re-runs only the final crop+fit step
+ * (`finalizeFrame`) against that box, reusing everything already detected.
+ */
+function FrameCropTool({ working, onApply }: { working: WorkingFrame; onApply: (box: FrameBox) => void }) {
+  const [box, setBox] = useState<CropFrac>(() => ({
+    x: working.autoBox.x / working.width,
+    y: working.autoBox.y / working.height,
+    w: working.autoBox.w / working.width,
+    h: working.autoBox.h / working.height,
+  }));
+  const frameRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ handle: CropHandle; startFrac: { x: number; y: number }; startBox: CropFrac } | null>(null);
+
+  const fracFromEvent = (e: React.PointerEvent) => {
+    const rect = frameRef.current!.getBoundingClientRect();
+    return { x: (e.clientX - rect.left) / rect.width, y: (e.clientY - rect.top) / rect.height };
+  };
+
+  const clampBox = (b: CropFrac): CropFrac => {
+    const w = clamp01WithMin(b.w, MIN_CROP_FRACTION, 1);
+    const h = clamp01WithMin(b.h, MIN_CROP_FRACTION, 1);
+    const x = clamp01(Math.min(b.x, 1 - w));
+    const y = clamp01(Math.min(b.y, 1 - h));
+    return { x, y, w, h };
+  };
+
+  // One flat handler (reading which handle was grabbed from a data attribute)
+  // rather than a curried `startDrag(handle)(e) => ...` factory: a function
+  // literal created fresh during render, closing over a ref, is flagged by
+  // react-hooks/refs even though it only ever runs later as an event
+  // callback — a single handler assigned directly avoids that ambiguity.
+  const startDrag = (e: React.PointerEvent<HTMLElement>) => {
+    const handle = e.currentTarget.dataset.handle as CropHandle | undefined;
+    if (!handle) return;
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { handle, startFrac: fracFromEvent(e), startBox: box };
+  };
+
+  const onMove = (e: React.PointerEvent) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const now = fracFromEvent(e);
+    const dx = now.x - drag.startFrac.x;
+    const dy = now.y - drag.startFrac.y;
+    const b = { ...drag.startBox };
+    if (drag.handle === "move") {
+      b.x = drag.startBox.x + dx;
+      b.y = drag.startBox.y + dy;
+    } else {
+      if (drag.handle.includes("w")) {
+        b.x = drag.startBox.x + dx;
+        b.w = drag.startBox.w - dx;
+      }
+      if (drag.handle.includes("e")) b.w = drag.startBox.w + dx;
+      if (drag.handle.includes("n")) {
+        b.y = drag.startBox.y + dy;
+        b.h = drag.startBox.h - dy;
+      }
+      if (drag.handle.includes("s")) b.h = drag.startBox.h + dy;
+    }
+    setBox(clampBox(b));
+  };
+
+  const endDrag = () => {
+    dragRef.current = null;
+  };
+
+  const apply = () => {
+    onApply({
+      x: Math.round(box.x * working.width),
+      y: Math.round(box.y * working.height),
+      w: Math.round(box.w * working.width),
+      h: Math.round(box.h * working.height),
+    });
+  };
+
+  const handles: { key: CropHandle; cursor: string }[] = [
+    { key: "nw", cursor: "nwse-resize" },
+    { key: "ne", cursor: "nesw-resize" },
+    { key: "sw", cursor: "nesw-resize" },
+    { key: "se", cursor: "nwse-resize" },
+  ];
+
+  return (
+    <div className="mt-3">
+      <div
+        ref={frameRef}
+        className="relative w-full touch-none select-none overflow-hidden rounded-xl border border-line"
+        style={{
+          aspectRatio: `${working.width} / ${working.height}`,
+          backgroundImage:
+            "linear-gradient(45deg,var(--surface-3) 25%,transparent 25%),linear-gradient(-45deg,var(--surface-3) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,var(--surface-3) 75%),linear-gradient(-45deg,transparent 75%,var(--surface-3) 75%)",
+          backgroundSize: "16px 16px",
+          backgroundPosition: "0 0,0 8px,8px -8px,-8px 0",
+          backgroundColor: "var(--surface)",
+        }}
+        onPointerMove={onMove}
+        onPointerUp={endDrag}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={working.dataUrl} alt="" className="pointer-events-none absolute inset-0 h-full w-full" draggable={false} />
+        <div
+          data-handle="move"
+          onPointerDown={startDrag}
+          className="absolute cursor-move border-2 border-accent bg-accent/10"
+          style={{
+            left: `${box.x * 100}%`,
+            top: `${box.y * 100}%`,
+            width: `${box.w * 100}%`,
+            height: `${box.h * 100}%`,
+          }}
+        >
+          {handles.map(({ key, cursor }) => (
+            <span
+              key={key}
+              data-handle={key}
+              onPointerDown={startDrag}
+              className="absolute h-4 w-4 rounded-full border-2 border-accent bg-white"
+              style={{
+                cursor,
+                left: key.includes("w") ? -8 : undefined,
+                right: key.includes("e") ? -8 : undefined,
+                top: key.includes("n") ? -8 : undefined,
+                bottom: key.includes("s") ? -8 : undefined,
+              }}
+            />
+          ))}
+        </div>
+      </div>
+      <Button variant="primary" size="sm" type="button" className="mt-3" onClick={apply}>
+        تطبيق القص
+      </Button>
+    </div>
+  );
+}
+
 function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
+}
+
+function clamp01WithMin(v: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, v));
 }
 
 const inputCls = "field";
