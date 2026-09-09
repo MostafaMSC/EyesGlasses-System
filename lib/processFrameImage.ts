@@ -742,6 +742,73 @@ function dropDetachedSpecks(data: Uint8ClampedArray, w: number, h: number) {
 }
 
 /**
+ * A pixel counts as "not convincingly opaque" for gap-closing purposes — a
+ * higher bar than OPAQUE_THRESHOLD (which asks "is this background at all?"),
+ * because the artifact this targets is a partial haze, not a fully cleared
+ * pixel.
+ */
+const GAP_ALPHA_THRESHOLD = 200;
+
+/**
+ * Restores any enclosed, not-fully-opaque pocket that isn't one of the two
+ * real lenses back to solid.
+ *
+ * A thin, bright bridge wire — gold or silver metal against a white studio
+ * backdrop — is exactly the low-contrast case both the ML model and the
+ * heuristic fill struggle with (see SOBEL_EDGE_THRESHOLD's note on thin
+ * bright rims): instead of staying solid, it can come back partially or
+ * fully cleared, leaving a translucent haze hanging between the lenses in
+ * the final overlay. Real background can never be trapped in a pocket that
+ * is fully surrounded by opaque frame pixels, so anything enclosed here
+ * that isn't a lens is an artifact of removal, not real content — it gets
+ * put back.
+ */
+function closeEnclosedAlphaGaps(data: Uint8ClampedArray, w: number, h: number, lenses: LensRegion[]) {
+  const isGap = (p: number) => data[p * 4 + 3] < GAP_ALPHA_THRESHOLD;
+  const outside = new Uint8Array(w * h);
+  const stack: number[] = [];
+
+  const push = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return;
+    const p = y * w + x;
+    if (outside[p] || !isGap(p)) return;
+    outside[p] = 1;
+    stack.push(p);
+  };
+
+  for (let x = 0; x < w; x++) {
+    push(x, 0);
+    push(x, h - 1);
+  }
+  for (let y = 0; y < h; y++) {
+    push(0, y);
+    push(w - 1, y);
+  }
+  while (stack.length) {
+    const p = stack.pop()!;
+    const x = p % w;
+    const y = (p / w) | 0;
+    push(x + 1, y);
+    push(x - 1, y);
+    push(x, y + 1);
+    push(x, y - 1);
+  }
+
+  const inLens = (x: number, y: number) =>
+    lenses.some((l) => x >= l.minX && x <= l.maxX && y >= l.minY && y <= l.maxY);
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x;
+      if (outside[p]) continue; // reachable from the border — real background
+      if (!isGap(p)) continue; // already solid
+      if (inLens(x, y)) continue; // a real lens, meant to stay translucent
+      data[p * 4 + 3] = 255;
+    }
+  }
+}
+
+/**
  * Softens the alpha channel with a small box blur. Background removal produces
  * hard binary edges that read as a cut-out sticker on a face; a one-pixel
  * feather blends the frame into the photo underneath.
@@ -1143,6 +1210,7 @@ export async function prepareWorkingFrame(file: File, manualSeeds?: ManualLensSe
     // watermark elsewhere in the canvas (e.g. exported from an editor with a
     // brand mark left in a corner) — same cleanup as the ML/heuristic path.
     dropDetachedSpecks(data, w, h);
+    closeEnclosedAlphaGaps(data, w, h, lenses);
   } else {
     const { outside, warning: bgWarning, usedML } = await removeBackground(canvas, data, w, h);
     warning = bgWarning;
@@ -1176,6 +1244,7 @@ export async function prepareWorkingFrame(file: File, manualSeeds?: ManualLensSe
 
     if (lenses.length === 2) clearLensReflections(data, w, h, lenses);
     dropDetachedSpecks(data, w, h);
+    closeEnclosedAlphaGaps(data, w, h, lenses);
     featherAlpha(data, w, h);
   }
 

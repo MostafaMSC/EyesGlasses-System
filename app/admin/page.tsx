@@ -436,6 +436,37 @@ export default function AdminPage() {
               صورة للنظارة <strong>من الأمام مباشرة</strong> (وليست بزاوية). لا حاجة لخلفية شفافة —
               الخلفية البيضاء تُزال تلقائياً ويتم تحديد مكان العدسات. الحد الأقصى 1.5 ميغابايت.
             </p>
+            <details className="mb-3 rounded-xl border border-line bg-surface-2 p-3 text-xs leading-6 text-muted">
+              <summary className="cursor-pointer select-none font-bold text-ink-soft">
+                كيف أصوّر النظارة لأفضل نتيجة؟
+              </summary>
+              <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <p className="mb-1 font-bold text-ink-soft">الأفضل</p>
+                  <ul className="list-inside list-disc space-y-0.5">
+                    <li>خلفية بيضاء أو رمادية فاتحة موحّدة، بلا نقوش أو تدرّج</li>
+                    <li>من الأمام مباشرة، والإطار مستقيم غير مائل</li>
+                    <li>إضاءة ناعمة وموزّعة (بدون فلاش مباشر)</li>
+                    <li>صورة حادة وواضحة، خصوصاً عند أطراف الأذرع</li>
+                    <li>الشعار (إن وجد) خارج حدود النظارة تماماً — فوقها أو تحتها</li>
+                  </ul>
+                </div>
+                <div>
+                  <p className="mb-1 font-bold text-ink-soft">تجنّب</p>
+                  <ul className="list-inside list-disc space-y-0.5">
+                    <li>خلفيات خشبية/طبيعية أو صوراً بزاوية أو بضبابية (bokeh)</li>
+                    <li>وهج أو انعكاس ضوئي واضح على العدسة</li>
+                    <li>عدسات بتدرّج لوني قوي (يصعّب تحديد حوافها تلقائياً)</li>
+                    <li>نصوص محفورة على العدسة نفسها إن أمكن تفاديها</li>
+                    <li>وضع النظارة بزاوية أو الأذرع متقاطعة فوق بعضها</li>
+                  </ul>
+                </div>
+              </div>
+              <p className="mt-2 text-[11px] text-muted/80">
+                صورة لا تطابق هذه المعايير قد تنجح تلقائياً، لكن إن لم تنجح استخدم &quot;تحديد
+                العدسات بالنقر&quot; أو &quot;قص الأذرع يدوياً&quot; أدناه بدل إعادة المحاولة تلقائياً.
+              </p>
+            </details>
             <input
               ref={fileRef}
               type="file"
