@@ -16,6 +16,13 @@ gradient-tinted lenses).
 
 ## Run it
 
+Easiest: `docker compose up --build` from the repo root runs this service
+together with the web app, already wired together — see the root
+`README.md`'s "Running with Docker" section. Its `Dockerfile` already
+includes the OpenGL/EGL libraries `/landmarks` needs (see Notes below).
+
+Without Docker:
+
 ```bash
 cd python-service
 python3 -m venv .venv

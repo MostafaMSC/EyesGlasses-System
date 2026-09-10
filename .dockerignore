@@ -1,0 +1,13 @@
+node_modules
+.next
+out
+build
+.git
+.env*
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+
+python-service/.venv
+python-service/__pycache__
+python-service/**/__pycache__

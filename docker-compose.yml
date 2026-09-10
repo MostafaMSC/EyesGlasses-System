@@ -1,0 +1,33 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      # Containers reach each other by service name on Docker's internal
+      # network, not localhost — this overrides the localhost default in
+      # app/api/segment-frame/route.ts and app/api/face-landmarks/route.ts.
+      - PYTHON_SERVICE_URL=http://ml-service:8000
+    depends_on:
+      ml-service:
+        condition: service_healthy
+
+  ml-service:
+    build:
+      context: .
+      dockerfile: python-service/Dockerfile
+    ports:
+      # Exposed to the host too, purely so you can curl/debug it directly
+      # (http://localhost:8000/health) — web talks to it over the internal
+      # network above regardless.
+      - "8000:8000"
+    volumes:
+      # /segment's rembg model (~176MB) downloads on first use and is cached
+      # here — without this volume it would re-download every `docker
+      # compose up --build`.
+      - u2net-models:/root/.u2net
+
+volumes:
+  u2net-models:

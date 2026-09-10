@@ -13,6 +13,28 @@ Open http://localhost:3000. To try the camera from a phone, use the
 or HTTPS — a plain `http://192.168.x.x` origin will be blocked by the browser,
 so use a tunnel such as `npx localtunnel --port 3000` for phone testing).
 
+## Running with Docker
+
+No local Node or Python install needed — this runs the web app **and** the
+optional Python ML service (see "Optional: the Python ML service" below)
+together, wired to each other automatically:
+
+```bash
+docker compose up --build
+```
+
+Open http://localhost:3000. The Python service is reachable at
+http://localhost:8000 too, if you want to `curl` it directly. First build
+takes a few minutes (installs mediapipe/onnxruntime); first `/segment`
+request also downloads rembg's ~176MB model once — after that it's cached in
+a Docker volume, so it isn't re-downloaded on the next `docker compose up`.
+
+Stop with `Ctrl+C`, or `docker compose down` to also remove the containers
+(`docker compose down -v` additionally clears the cached rembg model).
+
+Camera-based try-on still needs `localhost` or HTTPS in the browser (see
+above) — that's a browser rule, unaffected by Docker.
+
 ---
 
 ## Admin panel — adding frames without touching code
