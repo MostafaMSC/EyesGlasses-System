@@ -1,5 +1,5 @@
 import type { FacePose } from "@/lib/faceGeometry";
-import type { OverlayGeometry, TryOnConfig } from "@/data/products";
+import type { OverlayGeometry, SideOverlayGeometry, TryOnConfig } from "@/data/products";
 import {
   FRAME_EYE_CENTER_Y,
   FRAME_EYE_SPAN,
@@ -182,4 +182,88 @@ export function overlayTransform(placement: OverlayPlacement, opts?: { flattenDe
     `rotateY(${yawDeg}deg)`,
     `rotateX(${pitchDeg}deg)`,
   ].join(" ");
+}
+
+/**
+ * Placement for a side-profile overlay (temple arm visible), anchored on a
+ * single point instead of a lens pair — a side photo shows one visible
+ * lens/hinge, not two. Uses the same physical-width reference as
+ * `computeOverlayPlacement` (`pose.width` scaled by the same fixed
+ * default-geometry span) rather than a per-image lens span, so the frame
+ * doesn't visibly resize when cross-fading between the front and side
+ * images at similar yaw.
+ */
+export function computeSideOverlayPlacement(
+  pose: FacePose,
+  tryOn: TryOnConfig,
+  geometry: SideOverlayGeometry,
+  video: { videoWidth: number; videoHeight: number },
+  display: { width: number; height: number }
+): OverlayPlacement | null {
+  const { width: cw, height: ch } = display;
+  if (!video.videoWidth || !video.videoHeight || !cw || !ch) return null;
+  if (!(geometry.aspect > 0)) return null;
+
+  const { scale, offsetX, offsetY } = computeCoverTransform(video, display);
+
+  const widthPx =
+    pose.width * scale * tryOn.scale * (DEFAULT_OVERLAY_GEOMETRY.lensRightX - DEFAULT_OVERLAY_GEOMETRY.lensLeftX);
+  const heightPx = widthPx / geometry.aspect;
+  if (!Number.isFinite(widthPx) || !Number.isFinite(heightPx) || widthPx <= 0) return null;
+
+  const rollRad = (pose.roll * Math.PI) / 180;
+  const ux = Math.cos(rollRad);
+  const uy = Math.sin(rollRad);
+
+  const alongFace = tryOn.offsetX * widthPx;
+  const downFace = tryOn.offsetY * heightPx;
+
+  const centerXPx = pose.anchorX * scale - offsetX + alongFace * ux - downFace * uy;
+  const centerYPx = pose.anchorY * scale - offsetY + alongFace * uy + downFace * ux;
+  if (!Number.isFinite(centerXPx) || !Number.isFinite(centerYPx)) return null;
+
+  const anchorOffsetX = (geometry.anchorX - 0.5) * widthPx;
+  const anchorOffsetY = (geometry.anchorY - 0.5) * heightPx;
+
+  return {
+    leftPx: centerXPx - widthPx / 2 - anchorOffsetX * ux + anchorOffsetY * uy,
+    topPx: centerYPx - heightPx / 2 - anchorOffsetX * uy - anchorOffsetY * ux,
+    widthPx,
+    heightPx,
+    rollDeg: pose.roll + tryOn.rotationOffset,
+    yawDeg: pose.yaw,
+    pitchDeg: pose.pitch,
+  };
+}
+
+export interface SideOverlaySelection {
+  src: string;
+  placement: OverlayPlacement;
+}
+
+/**
+ * Picks the side-profile image relevant to the current yaw, if the product
+ * has one for that direction, and computes its placement. Returns null when
+ * there's nothing to show — the caller should keep rendering the front-only
+ * overlay in that case (this is what keeps every existing product, with no
+ * side images at all, rendering exactly as before this feature existed).
+ *
+ * Yaw sign convention: positive yaw is the frame's right side rotating away
+ * from the camera (see faceGeometry.ts's note on `rotateY`), which is when
+ * the right-side image should start coming into view. Flip this if testing
+ * on a real camera shows it backwards for this app's mirrored video.
+ */
+export function selectSideOverlay(
+  pose: FacePose,
+  tryOn: TryOnConfig,
+  video: { videoWidth: number; videoHeight: number },
+  display: { width: number; height: number }
+): SideOverlaySelection | null {
+  const useRight = pose.yaw > 0;
+  const src = useRight ? tryOn.rightImage : tryOn.leftImage;
+  const geometry = useRight ? tryOn.rightImageGeometry : tryOn.leftImageGeometry;
+  if (!src || !geometry) return null;
+
+  const placement = computeSideOverlayPlacement(pose, tryOn, geometry, video, display);
+  return placement ? { src, placement } : null;
 }

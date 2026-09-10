@@ -1423,3 +1423,102 @@ export async function processFrameImage(file: File, manualSeeds?: ManualLensSeed
   const working = await prepareWorkingFrame(file, manualSeeds);
   return finalizeFrame(working, working.autoBox);
 }
+
+// --- Side-profile photos (temple arm visible) ---------------------------
+//
+// A side shot needs the opposite treatment from a front photo: the temple
+// arm is the whole point, so there is no lens-pair detection and no
+// front-rim crop here — just background removal and a plain content crop.
+// Alignment is a single point (`SideOverlayGeometry.anchorX/Y`) placed by a
+// human click in the admin panel (see `SeedPicker`'s pattern in
+// app/admin/page.tsx) rather than auto-detected; a side photo's framing
+// varies too much for that to be worth automating for a first version.
+
+const SIDE_MAX_DIMENSION = 700;
+const SIDE_FINAL_WIDTH = 500;
+const SIDE_FINAL_HEIGHT = 380;
+const SIDE_PADDING_FRACTION = 0.06;
+
+export interface ProcessedSideFrame {
+  dataUrl: string;
+  width: number;
+  height: number;
+  alreadyTransparent: boolean;
+  warning?: string;
+}
+
+/**
+ * Removes the background from a side-profile photo and crops it tight to
+ * its own content — nothing lens- or arm-specific. Reuses the same
+ * `removeBackground` (ML with heuristic fallback) as the front pipeline.
+ */
+export async function processSideFrameImage(file: File): Promise<ProcessedSideFrame> {
+  const img = await loadImageFromFile(file);
+
+  const scale = Math.min(1, SIDE_MAX_DIMENSION / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Canvas is unavailable in this browser.");
+  ctx.drawImage(img, 0, 0, w, h);
+
+  const imageData = ctx.getImageData(0, 0, w, h);
+  const data = imageData.data;
+
+  let alreadyTransparent = false;
+  for (let p = 0; p < w * h; p += 7) {
+    if (data[p * 4 + 3] < 200) {
+      alreadyTransparent = true;
+      break;
+    }
+  }
+
+  let warning: string | undefined;
+  if (!alreadyTransparent) {
+    const { warning: bgWarning } = await removeBackground(canvas, data, w, h);
+    warning = bgWarning;
+    dropDetachedSpecks(data, w, h);
+    // No lens regions to protect here — any enclosed haze (e.g. a thin
+    // bright hinge/bridge sliver, same failure as the front pipeline) is
+    // always an artifact, never intentional translucency, for a side photo.
+    closeEnclosedAlphaGaps(data, w, h, []);
+    featherAlpha(data, w, h);
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+
+  const content = boundingBox(data, w, h);
+  const padX = Math.round(content.w * SIDE_PADDING_FRACTION);
+  const padY = Math.round(content.h * SIDE_PADDING_FRACTION);
+  const box = {
+    x: Math.max(0, content.x - padX),
+    y: Math.max(0, content.y - padY),
+    w: Math.min(w, content.w + padX * 2),
+    h: Math.min(h, content.h + padY * 2),
+  };
+
+  const fitScale = Math.min(SIDE_FINAL_WIDTH / box.w, SIDE_FINAL_HEIGHT / box.h);
+  const drawW = box.w * fitScale;
+  const drawH = box.h * fitScale;
+  const offsetX = (SIDE_FINAL_WIDTH - drawW) / 2;
+  const offsetY = (SIDE_FINAL_HEIGHT - drawH) / 2;
+
+  const out = document.createElement("canvas");
+  out.width = SIDE_FINAL_WIDTH;
+  out.height = SIDE_FINAL_HEIGHT;
+  const outCtx = out.getContext("2d");
+  if (!outCtx) throw new Error("Canvas is unavailable in this browser.");
+  outCtx.drawImage(canvas, box.x, box.y, box.w, box.h, offsetX, offsetY, drawW, drawH);
+
+  return {
+    dataUrl: out.toDataURL("image/png"),
+    width: SIDE_FINAL_WIDTH,
+    height: SIDE_FINAL_HEIGHT,
+    alreadyTransparent,
+    warning,
+  };
+}

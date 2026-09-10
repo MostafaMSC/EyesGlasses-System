@@ -10,27 +10,29 @@ import {
   type ReactNode,
 } from "react";
 import { products as demoProducts, type Product } from "@/data/products";
+import { idbDelete, idbGetAll, idbPut } from "@/lib/idbProductStore";
 
-const STORAGE_KEY = "abu-thar-custom-products-v1";
+/** Legacy localStorage key, kept only to migrate existing products into IndexedDB once. */
+const LEGACY_STORAGE_KEY = "abu-thar-custom-products-v1";
 
 interface ProductStore {
   /** Demo catalogue plus anything added from the admin panel. */
   products: Product[];
   customProducts: Product[];
-  /** False until localStorage has been read (avoids hydration mismatch). */
+  /** False until the product database has been read (avoids hydration mismatch). */
   hydrated: boolean;
-  addProduct: (product: Product) => void;
-  updateProduct: (id: string, product: Product) => void;
-  deleteProduct: (id: string) => void;
+  addProduct: (product: Product) => Promise<void>;
+  updateProduct: (id: string, product: Product) => Promise<void>;
+  deleteProduct: (id: string) => Promise<void>;
   isCustom: (id: string) => boolean;
   getById: (id: string) => Product | undefined;
 }
 
 const ProductStoreContext = createContext<ProductStore | null>(null);
 
-function readStorage(): Product[] {
+function readLegacyStorage(): Product[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? (parsed as Product[]) : [];
@@ -39,49 +41,65 @@ function readStorage(): Product[] {
   }
 }
 
-function writeStorage(items: Product[]) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-  } catch (err) {
-    // Most likely the 5MB quota, hit by embedding large images.
-    console.error("[productStore] Could not save products", err);
-    throw err;
-  }
+/**
+ * Loads products from IndexedDB. The very first time this runs after
+ * upgrading from the old localStorage-only store, IndexedDB is empty but a
+ * real catalogue may still be sitting in localStorage — that gets copied
+ * over once. The old key is left in place afterward (cheap insurance) rather
+ * than deleted.
+ */
+async function loadProducts(): Promise<Product[]> {
+  const fromDb = await idbGetAll<Product>();
+  if (fromDb.length > 0) return fromDb;
+
+  const legacy = readLegacyStorage();
+  if (legacy.length === 0) return [];
+
+  await Promise.all(legacy.map((p) => idbPut(p)));
+  return legacy;
 }
 
 export function ProductsProvider({ children }: { children: ReactNode }) {
   const [customProducts, setCustomProducts] = useState<Product[]>([]);
   const [hydrated, setHydrated] = useState(false);
 
-  // Read after mount, never during render — localStorage doesn't exist on the
+  // Read after mount, never during render — IndexedDB doesn't exist on the
   // server and reading it while rendering would desync hydration.
   useEffect(() => {
-    queueMicrotask(() => {
-      setCustomProducts(readStorage());
-      setHydrated(true);
-    });
+    let cancelled = false;
+    loadProducts()
+      .then((items) => {
+        if (cancelled) return;
+        setCustomProducts(items);
+        setHydrated(true);
+      })
+      .catch((err) => {
+        console.error("[productStore] Could not load products from IndexedDB", err);
+        if (cancelled) return;
+        // Degrade to whatever localStorage still has rather than showing an
+        // empty catalogue — this session just won't persist new changes.
+        setCustomProducts(readLegacyStorage());
+        setHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const persist = useCallback((next: Product[]) => {
-    setCustomProducts(next);
-    writeStorage(next);
+  const addProduct = useCallback(async (product: Product) => {
+    setCustomProducts((prev) => [...prev, product]);
+    await idbPut(product);
   }, []);
 
-  const addProduct = useCallback(
-    (product: Product) => persist([...readStorage(), product]),
-    [persist]
-  );
+  const updateProduct = useCallback(async (id: string, product: Product) => {
+    setCustomProducts((prev) => prev.map((p) => (p.id === id ? product : p)));
+    await idbPut(product);
+  }, []);
 
-  const updateProduct = useCallback(
-    (id: string, product: Product) =>
-      persist(readStorage().map((p) => (p.id === id ? product : p))),
-    [persist]
-  );
-
-  const deleteProduct = useCallback(
-    (id: string) => persist(readStorage().filter((p) => p.id !== id)),
-    [persist]
-  );
+  const deleteProduct = useCallback(async (id: string) => {
+    setCustomProducts((prev) => prev.filter((p) => p.id !== id));
+    await idbDelete(id);
+  }, []);
 
   const value = useMemo<ProductStore>(() => {
     const all = [...customProducts, ...demoProducts];

@@ -9,9 +9,15 @@ import { useFaceLandmarker } from "@/lib/useFaceLandmarker";
 import { useElementSize } from "@/lib/useElementSize";
 import { useBodyScrollLock } from "@/lib/useBodyScrollLock";
 import { computeFacePose, FacePoseSmoother, PitchCalibrator, type NormalizedPoint } from "@/lib/faceGeometry";
-import { computeCoverTransform, computeOverlayPlacement, type OverlayPlacement } from "@/lib/overlayPlacement";
+import {
+  computeCoverTransform,
+  computeOverlayPlacement,
+  selectSideOverlay,
+  type OverlayPlacement,
+  type SideOverlaySelection,
+} from "@/lib/overlayPlacement";
 import { loadImage } from "@/lib/loadImage";
-import { CONTACT_SHADOW, edgeFade, maskedOverlayCanvas } from "@/lib/overlayAppearance";
+import { CONTACT_SHADOW, edgeFade, maskedOverlayCanvas, sideBlendWeight } from "@/lib/overlayAppearance";
 import { openWhatsAppOrder } from "@/lib/whatsapp";
 import { GlassesOverlay } from "@/components/try-on/GlassesOverlay";
 import { TryOnProductSelector } from "@/components/try-on/TryOnProductSelector";
@@ -30,6 +36,35 @@ type FaceState = "searching" | "tracking" | "multiple";
  * Only treat tracking as truly lost after it's been missing this long.
  */
 const NO_FACE_GRACE_MS = 400;
+
+/**
+ * Draws one overlay image (front or side) into the capture canvas at the
+ * given placement and opacity — shared so the front/side cross-fade in the
+ * live preview (`GlassesOverlay`) is reproduced in the saved photo instead
+ * of only ever capturing the front image.
+ */
+function drawOverlayImage(
+  ctx: CanvasRenderingContext2D,
+  image: CanvasImageSource,
+  placement: OverlayPlacement,
+  alpha: number
+) {
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(placement.leftPx + placement.widthPx / 2, placement.topPx + placement.heightPx / 2);
+  ctx.rotate((placement.rollDeg * Math.PI) / 180);
+  // Canvas 2D has no depth, so yaw and pitch are approximated by squeezing
+  // the axis each one foreshortens.
+  const yawSquash = Math.max(Math.cos((placement.yawDeg * Math.PI) / 180), 0.55);
+  const pitchSquash = Math.max(Math.cos((placement.pitchDeg * Math.PI) / 180), 0.7);
+  ctx.scale(yawSquash, pitchSquash);
+  ctx.shadowColor = CONTACT_SHADOW.canvas.color;
+  ctx.shadowBlur = CONTACT_SHADOW.canvas.blur;
+  ctx.shadowOffsetY = CONTACT_SHADOW.canvas.offsetY;
+  ctx.drawImage(image, -placement.widthPx / 2, -placement.heightPx / 2, placement.widthPx, placement.heightPx);
+  ctx.restore();
+}
 
 export function VirtualTryOnModal() {
   const { tryOnProductId, closeTryOn, setTryOnProductId } = useShopUI();
@@ -54,6 +89,7 @@ export function VirtualTryOnModal() {
   const [permission, setPermission] = useState<PermissionState>("idle");
   const [faceState, setFaceState] = useState<FaceState>("searching");
   const [placement, setPlacement] = useState<OverlayPlacement | null>(null);
+  const [sideOverlay, setSideOverlay] = useState<SideOverlaySelection | null>(null);
   const [captured, setCaptured] = useState<string | null>(null);
 
   useEffect(() => {
@@ -136,6 +172,7 @@ export function VirtualTryOnModal() {
             setFaceState("searching");
             smootherRef.current.next(null, now);
             setPlacement(null);
+            setSideOverlay(null);
           }
           // Else: within the grace window, hold the last placement as-is.
         } else {
@@ -150,8 +187,10 @@ export function VirtualTryOnModal() {
           const pose = smootherRef.current.next(rawPose, now);
           if (pose && currentProduct && size.width && size.height) {
             setPlacement(computeOverlayPlacement(pose, currentProduct.tryOn, video, size));
+            setSideOverlay(selectSideOverlay(pose, currentProduct.tryOn, video, size));
           } else {
             setPlacement(null);
+            setSideOverlay(null);
           }
         }
       }
@@ -186,37 +225,25 @@ export function VirtualTryOnModal() {
     ctx.drawImage(video, -offsetX, -offsetY, video.videoWidth * scale, video.videoHeight * scale);
 
     if (placement) {
+      const blend = sideOverlay ? sideBlendWeight(placement.yawDeg) : 0;
       try {
-        const overlayImg = await loadImage(getProductVisualSrc(product));
-        // The preview fades the temple arms and casts a contact shadow; bake
-        // both in here too, or the saved photo comes out as a hard-edged
-        // cut-out that doesn't match what the user framed.
-        const faded = maskedOverlayCanvas(
-          overlayImg,
-          placement.widthPx,
-          placement.heightPx,
-          edgeFade(product.tryOn.edgeFade, placement.yawDeg)
-        );
-
-        ctx.save();
-        ctx.translate(placement.leftPx + placement.widthPx / 2, placement.topPx + placement.heightPx / 2);
-        ctx.rotate((placement.rollDeg * Math.PI) / 180);
-        // Canvas 2D has no depth, so yaw and pitch are approximated by
-        // squeezing the axis each one foreshortens.
-        const yawSquash = Math.max(Math.cos((placement.yawDeg * Math.PI) / 180), 0.55);
-        const pitchSquash = Math.max(Math.cos((placement.pitchDeg * Math.PI) / 180), 0.7);
-        ctx.scale(yawSquash, pitchSquash);
-        ctx.shadowColor = CONTACT_SHADOW.canvas.color;
-        ctx.shadowBlur = CONTACT_SHADOW.canvas.blur;
-        ctx.shadowOffsetY = CONTACT_SHADOW.canvas.offsetY;
-        ctx.drawImage(
-          faded ?? overlayImg,
-          -placement.widthPx / 2,
-          -placement.heightPx / 2,
-          placement.widthPx,
-          placement.heightPx
-        );
-        ctx.restore();
+        if (blend < 1) {
+          const overlayImg = await loadImage(getProductVisualSrc(product));
+          // The preview fades the temple arms; bake that in here too, or the
+          // saved photo comes out as a hard-edged cut-out that doesn't match
+          // what the user framed.
+          const faded = maskedOverlayCanvas(
+            overlayImg,
+            placement.widthPx,
+            placement.heightPx,
+            edgeFade(product.tryOn.edgeFade, placement.yawDeg)
+          );
+          drawOverlayImage(ctx, faded ?? overlayImg, placement, 1 - blend);
+        }
+        if (sideOverlay && blend > 0) {
+          const sideImg = await loadImage(sideOverlay.src);
+          drawOverlayImage(ctx, sideImg, sideOverlay.placement, blend);
+        }
       } catch {
         // ignore, still show the plain photo
       }
@@ -270,7 +297,12 @@ export function VirtualTryOnModal() {
                     muted
                     className="absolute inset-0 h-full w-full object-cover"
                   />
-                  <GlassesOverlay product={product} placement={placement} />
+                  <GlassesOverlay
+                    product={product}
+                    placement={placement}
+                    sideSrc={sideOverlay?.src}
+                    sidePlacement={sideOverlay?.placement}
+                  />
                 </div>
 
                 {permission === "granted" && faceState !== "tracking" && (

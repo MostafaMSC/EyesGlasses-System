@@ -52,6 +52,26 @@ export function edgeFadeMask(fade: EdgeFade | null): string | undefined {
   return `linear-gradient(to right, transparent 0%, #000 ${left}%, #000 ${right}%, transparent 100%)`;
 }
 
+/** Yaw magnitude below which only the front image shows. */
+const YAW_SIDE_START = 18;
+/** Yaw magnitude past which only the side-profile image shows. */
+const YAW_SIDE_FULL = 32;
+
+/**
+ * How much a side-profile image should show, from 0 (front only) to 1 (side
+ * only), for a given yaw.
+ *
+ * A hard swap at one angle would visibly "pop" mid-turn; cross-fading over a
+ * band feels closer to continuous rotation between the two flat images —
+ * still not true 3D, but far less jarring at the transition than a snap cut.
+ */
+export function sideBlendWeight(yawDeg: number): number {
+  const mag = Math.abs(yawDeg);
+  if (mag <= YAW_SIDE_START) return 0;
+  if (mag >= YAW_SIDE_FULL) return 1;
+  return (mag - YAW_SIDE_START) / (YAW_SIDE_FULL - YAW_SIDE_START);
+}
+
 /**
  * Grounds the frame against the face instead of looking like a sticker
  * floating above it.

@@ -8,6 +8,7 @@ import { newProductId, slugify, useProductStore } from "@/lib/productStore";
 import {
   prepareWorkingFrame,
   finalizeFrame,
+  processSideFrameImage,
   type ManualLensSeeds,
   type ProcessedFrame,
   type WorkingFrame,
@@ -70,6 +71,14 @@ interface FormState {
   lensY: number;
   imageAspect: number;
   edgeFade: number;
+  leftImage: string;
+  leftAnchorX: number;
+  leftAnchorY: number;
+  leftAspect: number;
+  rightImage: string;
+  rightAnchorX: number;
+  rightAnchorY: number;
+  rightAspect: number;
 }
 
 const EMPTY: FormState = {
@@ -97,6 +106,14 @@ const EMPTY: FormState = {
   lensY: 0.4833,
   imageAspect: 2.5,
   edgeFade: 0.12,
+  leftImage: "",
+  leftAnchorX: 0.5,
+  leftAnchorY: 0.5,
+  leftAspect: 500 / 380,
+  rightImage: "",
+  rightAnchorX: 0.5,
+  rightAnchorY: 0.5,
+  rightAspect: 500 / 380,
 };
 
 export default function AdminPage() {
@@ -163,10 +180,22 @@ export default function AdminPage() {
       offsetX: form.offsetX,
       offsetY: form.offsetY,
       rotationOffset: form.rotationOffset,
+      ...(form.leftImage
+        ? {
+            leftImage: form.leftImage,
+            leftImageGeometry: { aspect: form.leftAspect, anchorX: form.leftAnchorX, anchorY: form.leftAnchorY },
+          }
+        : {}),
+      ...(form.rightImage
+        ? {
+            rightImage: form.rightImage,
+            rightImageGeometry: { aspect: form.rightAspect, anchorX: form.rightAnchorX, anchorY: form.rightAnchorY },
+          }
+        : {}),
     },
   });
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!form.brand.trim() || !form.name.trim()) {
       setMessage({ kind: "error", text: "الماركة واسم الموديل مطلوبان." });
@@ -174,17 +203,19 @@ export default function AdminPage() {
     }
     try {
       if (editingId) {
-        updateProduct(editingId, buildProduct(editingId));
+        await updateProduct(editingId, buildProduct(editingId));
         setMessage({ kind: "ok", text: "تم تحديث النظارة." });
       } else {
         const id = newProductId();
-        addProduct(buildProduct(id));
+        await addProduct(buildProduct(id));
         setMessage({ kind: "ok", text: "تمت إضافة النظارة. تقدر تجربها بالكاميرا الآن." });
       }
       setForm(EMPTY);
       setEditingId(null);
       setLastFile(null);
+      setWorkingFrame(null);
       setPickingSeeds(false);
+      setCroppingArms(false);
       if (fileRef.current) fileRef.current.value = "";
     } catch {
       setMessage({
@@ -320,6 +351,14 @@ export default function AdminPage() {
       lensY: t.overlayGeometry?.lensY ?? EMPTY.lensY,
       imageAspect: t.overlayGeometry?.aspect ?? EMPTY.imageAspect,
       edgeFade: t.edgeFade ?? EMPTY.edgeFade,
+      leftImage: t.leftImage ?? "",
+      leftAnchorX: t.leftImageGeometry?.anchorX ?? EMPTY.leftAnchorX,
+      leftAnchorY: t.leftImageGeometry?.anchorY ?? EMPTY.leftAnchorY,
+      leftAspect: t.leftImageGeometry?.aspect ?? EMPTY.leftAspect,
+      rightImage: t.rightImage ?? "",
+      rightAnchorX: t.rightImageGeometry?.anchorX ?? EMPTY.rightAnchorX,
+      rightAnchorY: t.rightImageGeometry?.anchorY ?? EMPTY.rightAnchorY,
+      rightAspect: t.rightImageGeometry?.aspect ?? EMPTY.rightAspect,
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -565,6 +604,50 @@ export default function AdminPage() {
             )}
 
             <hr className="my-6 border-line" />
+            <h3 className="mb-2 text-sm font-bold text-ink">صور جانبية (اختياري)</h3>
+            <p className="mb-3 text-xs leading-6 text-muted">
+              صورة من الجانب الأيسر والأيمن (الذراع ظاهرة) — عند تجربة النظارة، إذا حرّك العميل
+              رأسه بزاوية تظهر هذه الصورة بدل عرض واجهة النظارة فقط. صوّرهما بنفس الإضاءة والمسافة
+              والخلفية التي صوّرت بها صورة الأمام، وبزاوية دوران حوالي 35-45 درجة.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <SidePhotoField
+                label="الجانب الأيسر"
+                value={
+                  form.leftImage
+                    ? { dataUrl: form.leftImage, anchorX: form.leftAnchorX, anchorY: form.leftAnchorY, aspect: form.leftAspect }
+                    : null
+                }
+                onChange={(v) =>
+                  setForm((f) => ({
+                    ...f,
+                    leftImage: v?.dataUrl ?? "",
+                    leftAnchorX: v?.anchorX ?? EMPTY.leftAnchorX,
+                    leftAnchorY: v?.anchorY ?? EMPTY.leftAnchorY,
+                    leftAspect: v?.aspect ?? EMPTY.leftAspect,
+                  }))
+                }
+              />
+              <SidePhotoField
+                label="الجانب الأيمن"
+                value={
+                  form.rightImage
+                    ? { dataUrl: form.rightImage, anchorX: form.rightAnchorX, anchorY: form.rightAnchorY, aspect: form.rightAspect }
+                    : null
+                }
+                onChange={(v) =>
+                  setForm((f) => ({
+                    ...f,
+                    rightImage: v?.dataUrl ?? "",
+                    rightAnchorX: v?.anchorX ?? EMPTY.rightAnchorX,
+                    rightAnchorY: v?.anchorY ?? EMPTY.rightAnchorY,
+                    rightAspect: v?.aspect ?? EMPTY.rightAspect,
+                  }))
+                }
+              />
+            </div>
+
+            <hr className="my-6 border-line" />
             <h3 className="mb-4 text-sm font-bold text-ink">ضبط الموضع على الوجه</h3>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label={`الحجم: ${form.scale.toFixed(2)}`}>
@@ -684,7 +767,9 @@ export default function AdminPage() {
                       <button
                         type="button"
                         onClick={() => {
-                          if (confirm(`حذف ${p.brand} ${p.name}؟`)) deleteProduct(p.id);
+                          if (confirm(`حذف ${p.brand} ${p.name}؟`)) {
+                            deleteProduct(p.id).catch((err) => console.error("[admin] delete failed", err));
+                          }
                         }}
                         className="rounded-full border border-line px-3 text-xs font-bold text-danger transition hover:border-danger/50 hover:bg-danger/10"
                       >
@@ -927,6 +1012,139 @@ function FrameCropTool({ working, onApply }: { working: WorkingFrame; onApply: (
       <Button variant="primary" size="sm" type="button" className="mt-3" onClick={apply}>
         تطبيق القص
       </Button>
+    </div>
+  );
+}
+
+interface SidePhotoValue {
+  dataUrl: string;
+  /** Fractions of the image's own width/height — the point that aligns to the face (hinge or visible lens). */
+  anchorX: number;
+  anchorY: number;
+  aspect: number;
+}
+
+/**
+ * Upload + anchor picker for a side-profile photo (temple arm kept visible,
+ * unlike the front image). Much simpler than the front pipeline: no lens
+ * detection, no arm cropping, no manual crop tool — just background removal
+ * and a single click to say where the frame lines up with the face. See
+ * `processSideFrameImage` (lib/processFrameImage.ts) for why side photos
+ * don't reuse the two-lens front pipeline.
+ */
+function SidePhotoField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: SidePhotoValue | null;
+  onChange: (value: SidePhotoValue | null) => void;
+}) {
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleFile = async (file: File) => {
+    if (file.size > MAX_IMAGE_BYTES) {
+      setError("حجم الصورة كبير. الحد الأقصى 1.5 ميغابايت.");
+      return;
+    }
+    setProcessing(true);
+    setError(null);
+    try {
+      const result = await processSideFrameImage(file);
+      onChange({ dataUrl: result.dataUrl, anchorX: 0.5, anchorY: 0.5, aspect: result.width / result.height });
+    } catch {
+      setError("تعذّرت معالجة الصورة. جرّب صورة أخرى.");
+    } finally {
+      setProcessing(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  const handlePickAnchor = (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!value) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    onChange({
+      ...value,
+      anchorX: clamp01((e.clientX - rect.left) / rect.width),
+      anchorY: clamp01((e.clientY - rect.top) / rect.height),
+    });
+  };
+
+  return (
+    <div className="rounded-xl border border-line bg-surface-2 p-3">
+      <p className="mb-2 text-xs font-bold text-ink-soft">{label}</p>
+
+      {value && (
+        <>
+          <div
+            className="relative inline-block max-w-full overflow-hidden rounded-lg"
+            style={{
+              backgroundImage:
+                "linear-gradient(45deg,var(--surface-3) 25%,transparent 25%),linear-gradient(-45deg,var(--surface-3) 25%,transparent 25%),linear-gradient(45deg,transparent 75%,var(--surface-3) 75%),linear-gradient(-45deg,transparent 75%,var(--surface-3) 75%)",
+              backgroundSize: "14px 14px",
+              backgroundPosition: "0 0,0 7px,7px -7px,-7px 0",
+              backgroundColor: "var(--surface)",
+            }}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={value.dataUrl}
+              alt=""
+              onClick={handlePickAnchor}
+              className="block max-h-48 max-w-full cursor-crosshair select-none"
+              draggable={false}
+            />
+            <span
+              className="pointer-events-none absolute h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-accent bg-accent/40"
+              style={{ left: `${value.anchorX * 100}%`, top: `${value.anchorY * 100}%` }}
+            />
+          </div>
+          <p className="mt-1.5 text-[11px] leading-5 text-muted">
+            انقر على الصورة لتحديد نقطة المحاذاة (المفصلة أو العدسة الظاهرة).
+          </p>
+        </>
+      )}
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/webp,image/jpeg"
+        disabled={processing}
+        onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+        className={value ? "hidden" : "block w-full text-xs text-ink-soft file:me-2 file:rounded-full file:border-0 file:bg-surface-3 file:px-3 file:py-1.5 file:text-xs file:font-semibold disabled:opacity-50"}
+      />
+
+      <div className="mt-2 flex flex-wrap gap-2">
+        {value && (
+          <>
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              className="rounded-full border border-line px-3 py-1 text-[11px] font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
+            >
+              تغيير الصورة
+            </button>
+            <button
+              type="button"
+              onClick={() => onChange(null)}
+              className="rounded-full border border-line px-3 py-1 text-[11px] font-bold text-danger transition hover:bg-danger/10"
+            >
+              إزالة
+            </button>
+          </>
+        )}
+      </div>
+
+      {processing && (
+        <p className="mt-2 flex items-center gap-1.5 text-[11px] font-bold text-accent">
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+          جاري إزالة الخلفية…
+        </p>
+      )}
+      {error && <p className="mt-2 text-[11px] font-bold text-danger">{error}</p>}
     </div>
   );
 }

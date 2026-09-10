@@ -19,6 +19,19 @@ export interface OverlayGeometry {
 }
 
 /**
+ * Alignment for a side-profile overlay image. A side shot shows one visible
+ * lens/hinge rather than a pair, so unlike `OverlayGeometry` there is a
+ * single anchor point (fractions of the image's own width/height) rather
+ * than two lens centres.
+ */
+export interface SideOverlayGeometry {
+  /** width / height of the image. */
+  aspect: number;
+  anchorX: number;
+  anchorY: number;
+}
+
+/**
  * Per-product try-on tuning. Different frames have different real-world
  * proportions, so `scale` / `offsetX` / `offsetY` / `rotationOffset` let you
  * nudge each product until it sits naturally on a face.
@@ -50,6 +63,17 @@ export interface TryOnConfig {
   offsetX: number;
   offsetY: number;
   rotationOffset: number;
+  /**
+   * Side-profile photos (temple arm visible, unlike the arm-less front
+   * overlay). When present, the live try-on cross-fades into these as the
+   * head turns past a yaw threshold instead of showing the front cutout
+   * from an angle. Optional — a product with neither renders exactly as
+   * front-only, same as before this field existed.
+   */
+  leftImage?: string;
+  leftImageGeometry?: SideOverlayGeometry;
+  rightImage?: string;
+  rightImageGeometry?: SideOverlayGeometry;
 }
 
 export interface Product {
