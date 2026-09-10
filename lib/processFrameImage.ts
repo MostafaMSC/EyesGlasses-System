@@ -562,12 +562,158 @@ function isLensShaped(r: LensRegion): boolean {
 }
 
 /**
- * Finds both lenses by growing outward from two seed points, then marks
- * exactly the grown pixels — not their bounding box — as translucent glass.
- * Seeds are either the caller's own click points (trusted outright, no
+ * Pixels the lens fill had to route around but which sit inside the lens
+ * opening anyway — a temple arm seen through the glass, a printed brand logo,
+ * a hard-edged reflection.
+ *
+ * `growLensRegion` follows colour, so it stops dead at anything crossing the
+ * lens and leaves that object at full opacity; composited onto a face those
+ * survive as a dark bar across the wearer's eye. Colour can't settle what
+ * they are — a dark arm behind the glass and a dark browline bar above it
+ * are the same pixels to a colour test — but geometry can: a pixel with lens
+ * on both sides of it horizontally AND vertically, within that lens's own
+ * bounding box, is enclosed by the lens opening whatever happens to be drawn
+ * on it.
+ *
+ * Requiring both axes rather than either is what keeps the fill inside the
+ * rim: a pixel out on the rim itself has lens to one side only, so it never
+ * qualifies. Confining the scan to the region's own bbox keeps one lens from
+ * reaching across the bridge into the other.
+ *
+ * An object that leaves the lens rather than crossing it — an arm running out
+ * through the hinge — stops qualifying where it exits, so it is cleared up to
+ * the rim and no further, which is the correct place to stop.
+ */
+function lensInteriorFill(members: number[], region: LensRegion, w: number): number[] {
+  const { minX, maxX, minY, maxY } = region;
+  const boxW = maxX - minX + 1;
+  const boxH = maxY - minY + 1;
+  if (boxW <= 0 || boxH <= 0) return [];
+
+  const inRegion = new Uint8Array(boxW * boxH);
+  for (const p of members) {
+    const x = p % w;
+    const y = (p / w) | 0;
+    if (x < minX || x > maxX || y < minY || y > maxY) continue;
+    inRegion[(y - minY) * boxW + (x - minX)] = 1;
+  }
+
+  const betweenRow = new Uint8Array(boxW * boxH);
+  for (let by = 0; by < boxH; by++) {
+    let first = -1;
+    let last = -1;
+    for (let bx = 0; bx < boxW; bx++) {
+      if (inRegion[by * boxW + bx]) {
+        if (first < 0) first = bx;
+        last = bx;
+      }
+    }
+    if (first < 0) continue;
+    for (let bx = first; bx <= last; bx++) betweenRow[by * boxW + bx] = 1;
+  }
+
+  const betweenColumn = new Uint8Array(boxW * boxH);
+  for (let bx = 0; bx < boxW; bx++) {
+    let first = -1;
+    let last = -1;
+    for (let by = 0; by < boxH; by++) {
+      if (inRegion[by * boxW + bx]) {
+        if (first < 0) first = by;
+        last = by;
+      }
+    }
+    if (first < 0) continue;
+    for (let by = first; by <= last; by++) betweenColumn[by * boxW + bx] = 1;
+  }
+
+  const filled: number[] = [];
+  for (let by = 0; by < boxH; by++) {
+    for (let bx = 0; bx < boxW; bx++) {
+      const i = by * boxW + bx;
+      if (inRegion[i]) continue;
+      if (betweenRow[i] && betweenColumn[i]) filled.push((by + minY) * w + (bx + minX));
+    }
+  }
+  return filled;
+}
+
+/** Median RGB of a lens's own grown pixels — the glass colour an occluder inside it should be repainted as. */
+function medianRegionColor(data: Uint8ClampedArray, members: number[]): [number, number, number] {
+  const channel = (offset: number) => {
+    const values: number[] = [];
+    // A lens can run to tens of thousands of pixels and only the middle value
+    // is wanted; sampling every 4th is plenty and keeps the sort cheap.
+    for (let i = 0; i < members.length; i += 4) values.push(data[members[i] * 4 + offset]);
+    if (values.length === 0) return 0;
+    values.sort((a, b) => a - b);
+    return values[Math.floor(values.length / 2)];
+  };
+  return [channel(0), channel(1), channel(2)];
+}
+
+/**
+ * Marks a lens: its own grown pixels keep their photographed colour at glass
+ * alpha, while anything enclosed by them is repainted to the lens's median
+ * colour first.
+ *
+ * Repainting matters as much as the alpha does. LENS_ALPHA is translucent,
+ * not invisible, so a black temple arm left at its own colour still reads as
+ * a dark streak through the glass at 15% opacity — only replacing the colour
+ * makes it genuinely disappear into the lens.
+ */
+function markLens(data: Uint8ClampedArray, w: number, lens: { region: LensRegion; members: number[] }) {
+  const [r, g, b] = medianRegionColor(data, lens.members);
+  for (const p of lensInteriorFill(lens.members, lens.region, w)) {
+    const i = p * 4;
+    data[i] = r;
+    data[i + 1] = g;
+    data[i + 2] = b;
+    data[i + 3] = LENS_ALPHA;
+  }
+  for (const p of lens.members) data[p * 4 + 3] = LENS_ALPHA;
+}
+
+/**
+ * Same enclosed-occluder clearing as `markLens`, for lenses that arrived
+ * already transparent rather than being colour-grown — a clear optical lens
+ * the ML matte saw straight through, or a source PNG that already had its
+ * lens openings cut out.
+ *
+ * Those paths never call `growLensRegion`, so nothing has looked at what sits
+ * inside the opening: an arm folded across the glass in the photo stays fully
+ * opaque in the middle of an otherwise cut-out lens. Here the hole's own
+ * transparent pixels stand in for the grown region, and anything they enclose
+ * is cleared outright — the surrounding lens is see-through, so an occluder
+ * inside it should be too, rather than being repainted to glass colour the
+ * way a tinted lens's is.
+ */
+function clearOccludersInsideHoles(data: Uint8ClampedArray, w: number, h: number, lenses: LensRegion[]) {
+  for (const region of lenses) {
+    const members: number[] = [];
+    for (let y = region.minY; y <= region.maxY; y++) {
+      for (let x = region.minX; x <= region.maxX; x++) {
+        if (x < 0 || y < 0 || x >= w || y >= h) continue;
+        const p = y * w + x;
+        if (data[p * 4 + 3] < OPAQUE_THRESHOLD) members.push(p);
+      }
+    }
+    if (members.length === 0) continue;
+    for (const p of lensInteriorFill(members, region, w)) data[p * 4 + 3] = 0;
+  }
+}
+
+/**
+ * Finds both lenses by growing outward from two seed points, then marks the
+ * grown pixels — plus whatever they enclose, see `markLens` — as translucent
+ * glass. Seeds are either the caller's own click points (trusted outright, no
  * pair-plausibility gate — a human already pointed at both lenses) or the
  * front-on, centred FRONT_LENS_SPAN guess (validated with
  * `isPlausibleLensPair`, since it can land on a gap or glare instead).
+ *
+ * Each lens clears its own cavity from its own geometry, so a dark object
+ * behind only one of them doesn't leave that side dirtier than the other —
+ * without forcing the two masks to mirror each other, which would fight the
+ * genuine left/right asymmetry every non-perfectly-square-on photo has.
  */
 function detectAndMarkLenses(
   data: Uint8ClampedArray,
@@ -585,8 +731,8 @@ function detectAndMarkLenses(
   if (!isLensShaped(left.region) || !isLensShaped(right.region)) return [];
   if (!trustSeeds && !isPlausibleLensPair(left.region, right.region)) return [];
 
-  for (const p of left.members) data[p * 4 + 3] = LENS_ALPHA;
-  for (const p of right.members) data[p * 4 + 3] = LENS_ALPHA;
+  markLens(data, w, left);
+  markLens(data, w, right);
 
   return [left.region, right.region];
 }
@@ -1350,6 +1496,7 @@ export async function prepareWorkingFrame(file: File, manualSeeds?: ManualLensSe
     // A bright glint can locally break an otherwise-transparent lens hole's
     // connectivity in the source alpha, leaving an isolated opaque fleck.
     if (lenses.length === 2) clearLensReflections(data, w, h, lenses);
+    clearOccludersInsideHoles(data, w, h, lenses);
     // A pre-made transparent PNG can still carry a stray opaque logo/
     // watermark elsewhere in the canvas (e.g. exported from an editor with a
     // brand mark left in a corner) — same cleanup as the ML/heuristic path.
@@ -1374,7 +1521,9 @@ export async function prepareWorkingFrame(file: File, manualSeeds?: ManualLensSe
       // anything about colour.
       lenses = findTransparentHoles(data, w, h);
       const plausible = lenses.length === 2 && isPlausibleLensPair(lenses[0], lenses[1]);
-      if (!plausible) {
+      if (plausible) {
+        clearOccludersInsideHoles(data, w, h, lenses);
+      } else {
         // A tinted/sunglasses lens looks like solid material to the model
         // (it has no notion of "glass"), so it comes back opaque along with
         // the rim — falls through to the same colour-seeded search as the
