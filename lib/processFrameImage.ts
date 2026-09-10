@@ -843,6 +843,117 @@ function featherAlpha(data: Uint8ClampedArray, w: number, h: number) {
   }
 }
 
+/** Median RGB from many border points — same sampling pattern as sampleBackgroundLab, kept in plain RGB since decontamination below works in the same space the source photo and canvas compositing already use. */
+function sampleBackgroundRGB(data: Uint8ClampedArray, w: number, h: number): [number, number, number] {
+  const Rs: number[] = [];
+  const Gs: number[] = [];
+  const Bs: number[] = [];
+  const step = Math.max(1, Math.floor(Math.min(w, h) / 40));
+  const sample = (x: number, y: number) => {
+    const i = (y * w + x) * 4;
+    Rs.push(data[i]);
+    Gs.push(data[i + 1]);
+    Bs.push(data[i + 2]);
+  };
+  for (let x = 0; x < w; x += step) {
+    sample(x, 0);
+    sample(x, h - 1);
+  }
+  for (let y = 0; y < h; y += step) {
+    sample(0, y);
+    sample(w - 1, y);
+  }
+  const median = (values: number[]) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  };
+  return [median(Rs), median(Gs), median(Bs)];
+}
+
+/**
+ * Removes background-colour bleed ("halo") left at partially-transparent
+ * edge pixels after segmentation.
+ *
+ * A photographed edge is rarely a clean step from frame to backdrop — camera
+ * anti-aliasing and JPEG compression blend the two right at the boundary —
+ * so a pixel the matte correctly marks, say, 40% opaque still holds close to
+ * its ORIGINAL blended colour, which sits far closer to the backdrop than to
+ * the frame. Composited over a face at that low alpha, the leftover
+ * background tint reads as a thin light ring around the frame — alpha alone
+ * (what featherAlpha smooths) was never the part carrying that colour.
+ *
+ * This unmixes each partially-transparent pixel assuming the standard
+ * over-compositing model (observed = alpha*fg + (1-alpha)*bg) to recover the
+ * frame's own colour, so what little of the edge pixel shows through is
+ * frame-coloured rather than backdrop-coloured. Solid interior pixels
+ * (alpha ~255) and fully-cleared ones (alpha 0) are left untouched — there's
+ * nothing to unmix at either extreme.
+ */
+function decontaminateEdgeColor(data: Uint8ClampedArray, w: number, h: number, bg: [number, number, number]) {
+  for (let p = 0; p < w * h; p++) {
+    const i = p * 4;
+    const a = data[i + 3];
+    if (a <= 0 || a >= 250) continue;
+    const af = a / 255;
+    for (let c = 0; c < 3; c++) {
+      const fg = (data[i + c] - (1 - af) * bg[c]) / af;
+      data[i + c] = clamp(Math.round(fg), 0, 255);
+    }
+  }
+}
+
+/**
+ * Overwrites fully-transparent pixels' colour with nearby frame colour,
+ * spreading outward a few pixels.
+ *
+ * Alpha 0 doesn't mean a pixel's RGB is never seen: `finalizeFrame` crops
+ * and rescales every photo into one shared canvas size, and that resampling
+ * blends neighbouring pixels' colour together before alpha is applied. Left
+ * as whatever the original backdrop colour was, that blend can reintroduce
+ * the exact background-tinted fringe `decontaminateEdgeColor` just removed
+ * — this leaves nothing background-coloured nearby for a later resize to
+ * blend in.
+ */
+function extendOpaqueColorIntoTransparency(data: Uint8ClampedArray, w: number, h: number, passes: number) {
+  for (let pass = 0; pass < passes; pass++) {
+    const alphaSnapshot = new Uint8ClampedArray(w * h);
+    for (let p = 0; p < w * h; p++) alphaSnapshot[p] = data[p * 4 + 3];
+
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const p = y * w + x;
+        if (alphaSnapshot[p] > 10) continue; // already has real colour of its own
+
+        let sr = 0;
+        let sg = 0;
+        let sb = 0;
+        let n = 0;
+        const neighbours: [number, number][] = [
+          [x - 1, y],
+          [x + 1, y],
+          [x, y - 1],
+          [x, y + 1],
+        ];
+        for (const [nx, ny] of neighbours) {
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const np = ny * w + nx;
+          if (alphaSnapshot[np] <= 10) continue;
+          const ni = np * 4;
+          sr += data[ni];
+          sg += data[ni + 1];
+          sb += data[ni + 2];
+          n++;
+        }
+        if (n === 0) continue;
+        const i = p * 4;
+        data[i] = Math.round(sr / n);
+        data[i + 1] = Math.round(sg / n);
+        data[i + 2] = Math.round(sb / n);
+      }
+    }
+  }
+}
+
 /**
  * Crop covering just the front of the frame: both lens openings plus the rim
  * around them, excluding the temple arms. Padding is derived from the lens
@@ -1279,6 +1390,8 @@ export async function prepareWorkingFrame(file: File, manualSeeds?: ManualLensSe
     dropDetachedSpecks(data, w, h);
     closeEnclosedAlphaGaps(data, w, h, lenses);
     featherAlpha(data, w, h);
+    decontaminateEdgeColor(data, w, h, sampleBackgroundRGB(data, w, h));
+    extendOpaqueColorIntoTransparency(data, w, h, 3);
   }
 
   ctx.putImageData(imageData, 0, 0);
@@ -1362,6 +1475,52 @@ export async function prepareWorkingFrame(file: File, manualSeeds?: ManualLensSe
 
 const sameBox = (a: FrameBox, b: FrameBox) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 
+/** Alpha above which a pixel counts as solid frame material for normalizeContrast. */
+const OPAQUE_FOR_CONTRAST = 250;
+
+/**
+ * Mild auto-levels stretch on solid frame pixels, so a photo shot under
+ * flat/dim admin lighting doesn't sit visibly duller in the catalogue next
+ * to one shot under better light.
+ *
+ * Deliberately conservative in two ways: it only stretches when the photo's
+ * own luminance range is genuinely compressed (a normally-exposed photo is
+ * left untouched rather than over-processed), and it stretches toward, not
+ * all the way to, the full 0-255 range, so a mildly flat photo doesn't get
+ * blown out the way a hard stretch would. Only touches fully-opaque pixels
+ * — translucent lens interiors and the feathered/decontaminated edge ring
+ * are left exactly as those earlier passes produced them. Runs last, on the
+ * final assembled canvas, entirely after lens detection and cropping are
+ * done, so it can never perturb the Lab/Otsu/Sobel thresholds those steps
+ * depend on.
+ */
+function normalizeContrast(data: Uint8ClampedArray, w: number, h: number) {
+  let lo = 255;
+  let hi = 0;
+  for (let p = 0; p < w * h; p++) {
+    const i = p * 4;
+    if (data[i + 3] < OPAQUE_FOR_CONTRAST) continue;
+    const l = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+    if (l < lo) lo = l;
+    if (l > hi) hi = l;
+  }
+  const range = hi - lo;
+  // Skip a photo that's already well-exposed (nothing compressed to fix) and
+  // guard against a degenerate near-solid-colour selection either way.
+  if (!(range > 5 && range < 180)) return;
+
+  const targetLo = 10;
+  const targetHi = 245;
+  const scale = (targetHi - targetLo) / range;
+  for (let p = 0; p < w * h; p++) {
+    const i = p * 4;
+    if (data[i + 3] < OPAQUE_FOR_CONTRAST) continue;
+    for (let c = 0; c < 3; c++) {
+      data[i + c] = clamp(Math.round(targetLo + (data[i + c] - lo) * scale), 0, 255);
+    }
+  }
+}
+
 /** Geometry for an arbitrary crop box, reusing real lens centres when known. */
 function geometryForBox(working: WorkingFrame, box: FrameBox): FrameGeometry {
   if (working.lensCenters) {
@@ -1429,6 +1588,10 @@ export async function finalizeFrame(working: WorkingFrame, box: FrameBox): Promi
   const outCtx = out.getContext("2d");
   if (!outCtx) throw new Error("Canvas is unavailable in this browser.");
   outCtx.drawImage(canvas, padded.x, padded.y, padded.w, padded.h, offsetX, offsetY, drawW, drawH);
+
+  const outImageData = outCtx.getImageData(0, 0, FINAL_CANVAS_WIDTH, FINAL_CANVAS_HEIGHT);
+  normalizeContrast(outImageData.data, FINAL_CANVAS_WIDTH, FINAL_CANVAS_HEIGHT);
+  outCtx.putImageData(outImageData, 0, 0);
 
   // Re-express the lens geometry against the new fixed canvas: the fractions
   // above are relative to the chosen box, so convert to absolute pixels in
@@ -1523,6 +1686,8 @@ export async function processSideFrameImage(file: File): Promise<ProcessedSideFr
     // always an artifact, never intentional translucency, for a side photo.
     closeEnclosedAlphaGaps(data, w, h, []);
     featherAlpha(data, w, h);
+    decontaminateEdgeColor(data, w, h, sampleBackgroundRGB(data, w, h));
+    extendOpaqueColorIntoTransparency(data, w, h, 3);
   }
 
   ctx.putImageData(imageData, 0, 0);
@@ -1549,6 +1714,10 @@ export async function processSideFrameImage(file: File): Promise<ProcessedSideFr
   const outCtx = out.getContext("2d");
   if (!outCtx) throw new Error("Canvas is unavailable in this browser.");
   outCtx.drawImage(canvas, box.x, box.y, box.w, box.h, offsetX, offsetY, drawW, drawH);
+
+  const sideOutImageData = outCtx.getImageData(0, 0, SIDE_FINAL_WIDTH, SIDE_FINAL_HEIGHT);
+  normalizeContrast(sideOutImageData.data, SIDE_FINAL_WIDTH, SIDE_FINAL_HEIGHT);
+  outCtx.putImageData(sideOutImageData, 0, 0);
 
   return {
     dataUrl: out.toDataURL("image/png"),
