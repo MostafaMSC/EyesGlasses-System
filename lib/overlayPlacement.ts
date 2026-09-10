@@ -187,11 +187,19 @@ export function overlayTransform(placement: OverlayPlacement, opts?: { flattenDe
 /**
  * Placement for a side-profile overlay (temple arm visible), anchored on a
  * single point instead of a lens pair — a side photo shows one visible
- * lens/hinge, not two. Uses the same physical-width reference as
- * `computeOverlayPlacement` (`pose.width` scaled by the same fixed
- * default-geometry span) rather than a per-image lens span, so the frame
+ * lens/hinge, not two.
+ *
+ * Sized against the SAME per-product physical-width reference
+ * `computeOverlayPlacement` uses for the front image — this product's own
+ * (sanitized) lens span, not the generic default span — so the frame
  * doesn't visibly resize when cross-fading between the front and side
- * images at similar yaw.
+ * images. A product whose front geometry has a narrower-than-default span
+ * (which `sanitizeOverlayGeometry` may itself widen towards plausibility)
+ * needs its side image widened by that same factor, or the side overlay
+ * renders at the bare default size — a fixed, product-independent size that
+ * has no reason to match this specific frame's real proportions, which is
+ * exactly what made it look "shrunk" relative to the front image it's
+ * supposed to continue.
  */
 export function computeSideOverlayPlacement(
   pose: FacePose,
@@ -206,8 +214,14 @@ export function computeSideOverlayPlacement(
 
   const { scale, offsetX, offsetY } = computeCoverTransform(video, display);
 
-  const widthPx =
+  const frontGeom = sanitizeOverlayGeometry(tryOn.overlayGeometry ?? DEFAULT_OVERLAY_GEOMETRY);
+  const lensSpanFrac = frontGeom ? frontGeom.lensRightX - frontGeom.lensLeftX : NaN;
+  const referenceSpanFrac =
+    lensSpanFrac > 0 ? lensSpanFrac : DEFAULT_OVERLAY_GEOMETRY.lensRightX - DEFAULT_OVERLAY_GEOMETRY.lensLeftX;
+
+  const lensSpanPx =
     pose.width * scale * tryOn.scale * (DEFAULT_OVERLAY_GEOMETRY.lensRightX - DEFAULT_OVERLAY_GEOMETRY.lensLeftX);
+  const widthPx = lensSpanPx / referenceSpanFrac;
   const heightPx = widthPx / geometry.aspect;
   if (!Number.isFinite(widthPx) || !Number.isFinite(heightPx) || widthPx <= 0) return null;
 
