@@ -17,6 +17,7 @@
  */
 
 import { segmentAlpha } from "@/lib/segmentFrame";
+import { segmentAlphaServer } from "@/lib/segmentFrameServer";
 
 export interface FrameGeometry {
   aspect: number;
@@ -1131,10 +1132,12 @@ function autoSeeds(data: Uint8ClampedArray, w: number, h: number) {
 }
 
 /**
- * Removes the background, preferring real ML segmentation and falling back
- * to the colour/edge heuristics only if the model can't load (offline, an
- * old browser, a missing self-hosted asset) — so the tool still works
- * either way instead of hard-failing when ML is unavailable.
+ * Removes the background, preferring the Python ML service's full u2net
+ * model (see python-service/README.md) when it's reachable, then the
+ * in-browser u2netp model, and falling back to the colour/edge heuristics
+ * only if neither model is available (service not running, offline, an old
+ * browser, a missing self-hosted asset) — so the tool still works either way
+ * instead of hard-failing when ML is unavailable.
  */
 async function removeBackground(
   canvas: HTMLCanvasElement,
@@ -1142,11 +1145,23 @@ async function removeBackground(
   w: number,
   h: number
 ): Promise<{ outside: Uint8Array; warning?: string; usedML: boolean }> {
-  try {
-    const maskAlpha = await segmentAlpha(canvas, w, h);
+  const applyMask = (maskAlpha: Uint8ClampedArray) => {
     for (let p = 0; p < w * h; p++) data[p * 4 + 3] = maskAlpha[p];
     const outside = new Uint8Array(w * h);
     for (let p = 0; p < w * h; p++) outside[p] = data[p * 4 + 3] <= OPAQUE_THRESHOLD ? 1 : 0;
+    return outside;
+  };
+
+  try {
+    const outside = applyMask(await segmentAlphaServer(canvas, w, h));
+    return { outside, usedML: true };
+  } catch {
+    // Expected whenever python-service isn't running — not an error worth
+    // logging, just a silent fall-through to the in-browser model.
+  }
+
+  try {
+    const outside = applyMask(await segmentAlpha(canvas, w, h));
     return { outside, usedML: true };
   } catch (err) {
     console.error("[processFrameImage] ML segmentation unavailable, using heuristic background removal", err);
