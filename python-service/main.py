@@ -7,17 +7,23 @@ benefit from real Python ML libraries instead of the browser's WASM/JS
 constraints:
 
   - POST /segment    Frame-photo background removal for admin product
-                      uploads. Runs rembg's full u2net model (native
+                      uploads. Runs rembg's isnet-general-use model (native
                       onnxruntime, multi-threaded, with alpha-matting edge
                       refinement) instead of the quantized u2netp that
                       lib/segmentFrame.ts runs single-threaded under
-                      onnxruntime-web/WASM — same model family, meant to
-                      produce cleaner edges on thin wire rims and gradient
-                      lenses. The Next.js app tries this service first (see
-                      lib/segmentFrameServer.ts) and falls back to the
-                      in-browser model, then the colour-heuristic pipeline,
-                      if it's unreachable — this service is an optional
-                      accuracy upgrade, not a hard dependency.
+                      onnxruntime-web/WASM — meant to produce cleaner edges
+                      on thin wire rims and gradient lenses. Images are
+                      downscaled to MAX_PROCESSING_DIMENSION before
+                      inference for speed, and the returned mask is reduced
+                      to its single largest connected component so a
+                      floating logo, brand tag, or stray background speck
+                      the matting didn't fully clear can't survive into the
+                      lens-detection step downstream. The Next.js app tries
+                      this service first (see lib/segmentFrameServer.ts) and
+                      falls back to the in-browser model, then the
+                      colour-heuristic pipeline, if it's unreachable — this
+                      service is an optional accuracy upgrade, not a hard
+                      dependency.
 
   - POST /landmarks  Face landmark detection on a single still image, using
                       the same face_landmarker.task model already self-hosted
@@ -58,8 +64,35 @@ app.add_middleware(
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LANDMARKER_MODEL_PATH = REPO_ROOT / "public" / "mediapipe" / "face_landmarker.task"
 
+# rembg's own inference resamples internally regardless of input size, so
+# processing a smaller image costs nothing in mask quality and meaningfully
+# less in wall-clock time on a big product photo.
+MAX_PROCESSING_DIMENSION = 1024
+
 _rembg_session = None
 _landmarker = None
+
+
+def _keep_largest_component(mask: "np.ndarray", threshold: int = 127) -> "np.ndarray":
+    """
+    Zeroes out every foreground blob except the largest one. A floating logo,
+    brand tag, or stray background speck rembg's matting didn't fully clear
+    is almost always much smaller than the glasses frame itself — the one
+    blob actually supposed to be here — so this is a cheap, reliable way to
+    strip it before lib/processFrameImage.ts's own lens-detection step ever
+    sees it.
+    """
+    import cv2
+
+    binary = (mask > threshold).astype(np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if num_labels <= 2:  # label 0 is background; at most one real component already
+        return mask
+    areas = stats[1:, cv2.CC_STAT_AREA]  # skip the background label
+    largest_label = 1 + int(np.argmax(areas))
+    result = mask.copy()
+    result[labels != largest_label] = 0
+    return result
 
 
 def _read_image(upload: UploadFile) -> Image.Image:
@@ -88,11 +121,21 @@ async def segment(file: UploadFile = File(...)):
 
     global _rembg_session
     if _rembg_session is None:
-        _rembg_session = new_session("u2net")
+        _rembg_session = new_session("isnet-general-use")
 
     image = _read_image(file)
+    original_size = image.size  # (w, h)
+
+    max_dim = max(original_size)
+    if max_dim > MAX_PROCESSING_DIMENSION:
+        scale = MAX_PROCESSING_DIMENSION / max_dim
+        small_size = (round(original_size[0] * scale), round(original_size[1] * scale))
+        process_image = image.resize(small_size, Image.LANCZOS)
+    else:
+        process_image = image
+
     mask = remove(
-        image,
+        process_image,
         session=_rembg_session,
         only_mask=True,
         alpha_matting=True,
@@ -100,6 +143,17 @@ async def segment(file: UploadFile = File(...)):
         alpha_matting_background_threshold=10,
         alpha_matting_erode_size=5,
     )
+
+    mask_array = _keep_largest_component(np.array(mask))
+    mask = Image.fromarray(mask_array, mode="L")
+
+    # Callers (lib/segmentFrameServer.ts) draw this straight onto a canvas
+    # already sized to their own working resolution, so returning it at
+    # process_image's (possibly downscaled) size would still work — but
+    # resizing here keeps the contract exactly "same size as the input"
+    # rather than leaving that rescale as an implicit side effect downstream.
+    if mask.size != original_size:
+        mask = mask.resize(original_size, Image.LANCZOS)
 
     buf = io.BytesIO()
     mask.save(buf, format="PNG")

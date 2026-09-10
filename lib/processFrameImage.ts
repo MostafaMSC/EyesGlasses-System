@@ -1039,6 +1039,24 @@ function columnProfileCrop(
 }
 
 /**
+ * Auto-detection can land the two lenses at genuinely different distances
+ * from the frame's own centre line — glare eating into one lens, a hinge
+ * shadow biasing the other's seed growth — while still passing both
+ * `isPlausibleLensPair` and `isPlausibleGeometry`: their tolerances exist for
+ * real, mildly-imperfect photos, not to catch every asymmetry. The visible
+ * result is the overlay rendering off-centre or hugging one eye instead of
+ * both. Recentering the reported span around the exact midpoint (0.5)
+ * removes that failure mode outright — it changes only the normalized
+ * alignment metadata used to place the overlay, never the crop itself, and
+ * is never applied to manual seeds: a human's own two clicks are trusted
+ * as-is (see the note at this function's call site).
+ */
+function enforceLensSymmetry(g: FrameGeometry): FrameGeometry {
+  const span = g.lensRightX - g.lensLeftX;
+  return { ...g, lensLeftX: 0.5 - span / 2, lensRightX: 0.5 + span / 2 };
+}
+
+/**
  * Rejects lens measurements that cannot describe a real pair of glasses.
  *
  * This matters more than it looks: the on-screen size is derived by dividing
@@ -1283,12 +1301,15 @@ export async function prepareWorkingFrame(file: File, manualSeeds?: ManualLensSe
   // `detectAndMarkLenses`, still guards against a leaked/malformed region.
   if (lenses.length === 2 && (manualSeeds || isPlausibleLensPair(lenses[0], lenses[1]))) {
     const candidateBox = frontRimBox(lenses, contentBox);
-    const candidate: FrameGeometry = {
+    let candidate: FrameGeometry = {
       aspect: candidateBox.w / candidateBox.h,
       lensLeftX: (lenses[0].cx - candidateBox.x) / candidateBox.w,
       lensRightX: (lenses[1].cx - candidateBox.x) / candidateBox.w,
       lensY: ((lenses[0].cy + lenses[1].cy) / 2 - candidateBox.y) / candidateBox.h,
     };
+    // A human's two clicks already say "these are the lenses" — forcing
+    // symmetry on top would override a deliberate, trusted correction.
+    if (!manualSeeds) candidate = enforceLensSymmetry(candidate);
     if (isPlausibleGeometry(candidate) || manualSeeds) {
       box = candidateBox;
       geometry = candidate;

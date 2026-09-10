@@ -6,3 +6,6 @@ numpy>=1.26
 rembg>=2.0.59
 onnxruntime>=1.19
 mediapipe>=0.10.14
+# Already pulled in transitively by mediapipe (opencv-contrib-python) — listed
+# explicitly because /segment's largest-component cleanup uses cv2 directly.
+opencv-contrib-python>=4.10
