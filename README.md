@@ -235,6 +235,27 @@ cp node_modules/onnxruntime-web/dist/ort.wasm.min.mjs public/onnxruntime/
 The model itself (`public/models/u2netp.onnx`) only needs updating if you
 want to swap it for a different segmentation model.
 
+### Optional: the Python ML service, for even sharper cutouts
+
+`/admin` photo upload tries, in order: the Python service (`python-service/`,
+if running — full u2net + alpha-matting edge refinement, see
+`python-service/README.md`), then the in-browser model above, then the
+CIELAB/Sobel/Otsu heuristic. Nothing else changes and nothing is required to
+run it — it's a drop-in accuracy upgrade for admins who want it:
+
+```bash
+cd python-service
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+The same service also exposes `POST /landmarks` (face landmark detection on
+a single still image, reusing `public/mediapipe/face_landmarker.task`) for
+offline/one-shot use — an accuracy-check or calibration tool, say. It is
+**not** wired into the live camera try-on: round-tripping every video frame
+through HTTP would make the real-time overlay laggy, so the live loop stays
+on `lib/useFaceLandmarker.ts`'s in-browser MediaPipe.
+
 ---
 
 ## Notes

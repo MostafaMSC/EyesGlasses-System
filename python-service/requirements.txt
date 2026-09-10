@@ -1,0 +1,8 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+python-multipart>=0.0.9
+pillow>=10.4
+numpy>=1.26
+rembg>=2.0.59
+onnxruntime>=1.19
+mediapipe>=0.10.14
