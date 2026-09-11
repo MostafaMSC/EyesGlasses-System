@@ -5,10 +5,15 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      # Loopback only: a reverse proxy in front terminates TLS and forwards
-      # here. Publishing on every interface would expose the app over plain
-      # HTTP, and the camera-based try-on needs HTTPS to work at all.
-      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+      # Loopback only by default: a reverse proxy in front terminates TLS and
+      # forwards here. Publishing on every interface would expose the app over
+      # plain HTTP, and the camera-based try-on needs HTTPS to work at all.
+      #
+      # WEB_PORT matters when slotting in behind a proxy that already forwards
+      # to a fixed port. WEB_HOST is the escape hatch for a proxy that reaches
+      # the app as `localhost` and resolves that to IPv6 — a 127.0.0.1 binding
+      # never answers ::1, which shows up as a 502 with nothing in the logs.
+      - "${WEB_HOST:-127.0.0.1}:${WEB_PORT:-3000}:3000"
     environment:
       # Containers reach each other by service name on Docker's internal
       # network, not localhost.
