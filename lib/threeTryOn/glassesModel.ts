@@ -54,6 +54,55 @@ function measure(object: Object3D): { box: Box3; size: Vector3 } {
   return { box, size: box.getSize(new Vector3()) };
 }
 
+/** Depth slice, from the front, treated as "the front of the frame". */
+const FRONT_SLICE = 0.12;
+/** Half-width of the column sampled around each lens centre. */
+const LENS_COLUMN = 0.04;
+/** Below this many sampled vertices the measurement isn't trustworthy. */
+const MIN_LENS_SAMPLES = 50;
+
+/**
+ * Height of the lens-centre line, measured from the model's own geometry.
+ *
+ * This has to be the *optical centre*, because that is the point placed on
+ * the wearer's pupils. The bounding box's vertical middle is not it: a frame
+ * with a heavy brow bar, or arms that drop behind the ear, shifts the box
+ * without moving the lenses, and anchoring on the box then lifts the frame
+ * onto the forehead or drops it onto the cheeks.
+ *
+ * Measured by sampling the two columns of front-facing geometry where the
+ * lenses sit and averaging their height — on a real frame those columns are
+ * almost entirely lens surface and rim, centred on the optical axis.
+ */
+function measureLensHeight(object: Object3D, box: Box3, size: Vector3): number {
+  const frontCut = box.max.z - size.z * FRONT_SLICE;
+  const centreX = (box.min.x + box.max.x) / 2;
+  const lensOffsetX = size.x * (GLB_LENS_SPAN_FRACTION / 2);
+  const tolerance = size.x * LENS_COLUMN;
+
+  const vertex = new Vector3();
+  let sum = 0;
+  let count = 0;
+
+  object.updateWorldMatrix(true, true);
+  object.traverse((node) => {
+    const mesh = node as Mesh;
+    if (!mesh.isMesh) return;
+    const position = mesh.geometry?.getAttribute("position");
+    if (!position) return;
+    for (let i = 0; i < position.count; i++) {
+      vertex.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld);
+      if (vertex.z < frontCut) continue;
+      const dx = Math.abs(Math.abs(vertex.x - centreX) - lensOffsetX);
+      if (dx > tolerance) continue;
+      sum += vertex.y;
+      count++;
+    }
+  });
+
+  return count >= MIN_LENS_SAMPLES ? sum / count : (box.min.y + box.max.y) / 2;
+}
+
 /**
  * The placeholder frame used when a product has no GLB. Built in lens-span
  * units with its lens centres already 1 unit apart and centred on the origin,
@@ -86,10 +135,14 @@ async function loadFromUrl(url: string): Promise<GlassesModel> {
   }
 
   // Convention for an uploaded GLB: modelled facing +Z with the temple arms
-  // running back along -Z, so its front face (max Z) is the lens plane and its
-  // horizontal/vertical centre is the lens-centre line.
+  // running back along -Z, so its front face (max Z) is the lens plane.
+  // Horizontally the frame is symmetric, so the box's centre is the bridge;
+  // vertically the lens line has to be measured, not assumed.
   const centre = box.getCenter(new Vector3());
-  const root = anchorAtOrigin(scene, new Vector3(centre.x, centre.y, box.max.z));
+  const root = anchorAtOrigin(
+    scene,
+    new Vector3(centre.x, measureLensHeight(scene, box, size), box.max.z)
+  );
 
   return {
     root,

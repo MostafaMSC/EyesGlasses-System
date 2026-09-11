@@ -8,6 +8,22 @@ npm install
 npm run dev
 ```
 
+The catalogue lives in Postgres, so `npm run dev` needs one. Easiest is a
+throwaway container plus a `.env.local` (gitignored):
+
+```bash
+docker run -d --name abuthar-devdb -p 55432:5432 \
+  -e POSTGRES_USER=abuthar -e POSTGRES_PASSWORD=devpass -e POSTGRES_DB=abuthar \
+  postgres:17-alpine
+```
+
+```bash
+printf 'DATABASE_URL=postgres://abuthar:devpass@127.0.0.1:55432/abuthar\nADMIN_PASSWORD=dev-password-1234\n' > .env.local
+```
+
+Or skip all of it and use `docker compose up` below, which wires the database
+up for you.
+
 The admin panel's photo-upload pipeline (background removal + lens
 detection) needs the Python microservice running too — see
 `services/frame-processor/README.md` (Docker or plain Python, either works):
