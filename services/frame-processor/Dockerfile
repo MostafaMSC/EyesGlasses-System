@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# opencv-python-headless still links against these even with no GUI/display
+# support.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Bake the segmentation model weights into the image at build time, so the
+# container never needs outbound internet at startup in production — only
+# once, here, when the image is built.
+RUN python -c "from rembg import new_session; new_session('isnet-general-use')"
+
+COPY . .
+
+EXPOSE 8001
+
+# Binds to all interfaces *inside* the container — this is normal and safe.
+# What actually keeps the service internal-only is how the container is
+# run: always publish it bound to the host's loopback interface (see
+# README.md / docker-compose.yml), never a bare `-p 8001:8001` (which would
+# publish it on every network interface, i.e. make it public).
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]

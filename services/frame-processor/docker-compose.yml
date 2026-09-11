@@ -1,0 +1,11 @@
+services:
+  frame-processor:
+    build: .
+    restart: unless-stopped
+    # Bound to the host's loopback interface only — the Next.js app (running
+    # directly on the host, not in a container) reaches it at
+    # http://127.0.0.1:8001, and nothing outside the host can reach it.
+    # Do not change this to "8001:8001" — that publishes it on every
+    # network interface, making it public.
+    ports:
+      - "127.0.0.1:8001:8001"

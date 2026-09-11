@@ -10,12 +10,11 @@ npm run dev
 
 The admin panel's photo-upload pipeline (background removal + lens
 detection) needs the Python microservice running too — see
-`services/frame-processor/README.md`:
+`services/frame-processor/README.md` (Docker or plain Python, either works):
 
 ```bash
 cd services/frame-processor
-python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
-./venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001
+docker compose up -d --build
 ```
 
 Everything else (the storefront, the live camera try-on) works without it —
