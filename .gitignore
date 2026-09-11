@@ -45,9 +45,11 @@ services/frame-processor/venv/
 services/frame-processor/__pycache__/
 services/frame-processor/*.pyc
 
-# 3D frame models dropped in the project root while being prepared for
-# upload. Raw generator output runs tens of MB, and these are uploaded
-# through /admin rather than served from the repo — only the root is
-# ignored, so a deliberate asset under public/ can still be committed.
-/*.glb
-/*.gltf
+# 3D frame models. Raw generator output runs tens of megabytes and gets
+# optimised locally before it is used, so scratch models are ignored wherever
+# they land — except under public/, which is exactly where a model the site
+# actually serves belongs (see README, "Where the model file lives").
+*.glb
+*.gltf
+!public/**/*.glb
+!public/**/*.gltf

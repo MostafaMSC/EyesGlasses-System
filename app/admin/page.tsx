@@ -1183,6 +1183,8 @@ function Model3dField({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [reading, setReading] = useState(false);
+  /** An uploaded model lives in the value itself; a served one is just a path. */
+  const isEmbedded = value.startsWith("data:");
 
   const handleFile = async (file: File) => {
     if (file.size > MAX_MODEL_BYTES) {
@@ -1216,45 +1218,64 @@ function Model3dField({
       <p className="mb-3 text-xs leading-6 text-muted">
         ملف <code>.glb</code> للنظارة. عند إضافته تُعرض النظارة في التجربة المباشرة كمجسم حقيقي
         يدور مع الرأس وتختفي أذرعه خلف الأذنين، بدل تحريك صورة مسطّحة. يجب أن يكون المجسم موجّهاً
-        للأمام مع امتداد الأذرع للخلف، ومركزه بين العدستين.
+        للأمام مع امتداد الأذرع للخلف، ومركزه بين العدستين، وعدساته شفافة أو محذوفة حتى تظهر
+        عين العميل.
       </p>
 
-      {value && (
+      {isEmbedded && (
         <p className="mb-2 text-[11px] font-bold text-accent">
-          ✓ تم إضافة مجسم ({Math.round(value.length / 1024)} كيلوبايت)
+          ✓ مجسم مرفوع داخل المنتج ({Math.round(value.length / 1024)} كيلوبايت)
         </p>
       )}
 
+      {/* The recommended route: the model is a file served by the site, and
+          the product stores only its path. Nothing is embedded, so there is no
+          size limit to speak of, the browser caches it, and it is fetched only
+          when someone opens the try-on — not on every page load, which is what
+          an embedded model costs (see lib/productStore.tsx's idbGetAll). */}
+      <label className="mb-1 block text-xs font-bold text-ink-soft">
+        مسار الملف على الموقع
+      </label>
       <input
-        ref={inputRef}
-        type="file"
-        accept=".glb,.gltf,model/gltf-binary"
-        disabled={reading}
-        onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
-        className={
-          value
-            ? "hidden"
-            : "block w-full text-xs text-ink-soft file:me-2 file:rounded-full file:border-0 file:bg-surface-3 file:px-3 file:py-1.5 file:text-xs file:font-semibold disabled:opacity-50"
-        }
+        type="text"
+        dir="ltr"
+        value={isEmbedded ? "" : value}
+        placeholder="/assets/frames/wayfarer.glb"
+        disabled={isEmbedded}
+        onChange={(e) => onChange(e.target.value.trim())}
+        className={`${inputCls} disabled:opacity-50`}
       />
+      <p className="mt-1 mb-3 text-[11px] leading-5 text-muted">
+        ضع الملف في <code>public/assets/frames/</code> واكتب مساره هنا. هذي الطريقة المفضّلة —
+        بلا حد للحجم، ولا تُبطّئ باقي صفحات الموقع.
+      </p>
+
+      <details className="mb-1">
+        <summary className="cursor-pointer text-[11px] font-bold text-ink-soft">
+          أو ارفع الملف داخل المنتج (حد {Math.round(MAX_MODEL_BYTES / (1024 * 1024))} ميغابايت)
+        </summary>
+        <p className="mt-2 mb-2 text-[11px] leading-5 text-muted">
+          مناسب للتجربة السريعة فقط: الملف يُخزَّن داخل المنتج في هذا المتصفح، فيكبر حجمه بنحو
+          الثلث، ويُقرأ عند كل تحميل صفحة.
+        </p>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".glb,.gltf,model/gltf-binary"
+          disabled={reading}
+          onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+          className="block w-full text-xs text-ink-soft file:me-2 file:rounded-full file:border-0 file:bg-surface-3 file:px-3 file:py-1.5 file:text-xs file:font-semibold disabled:opacity-50"
+        />
+      </details>
 
       {value && (
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            className="rounded-full border border-line px-3 py-1 text-[11px] font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
-          >
-            تغيير المجسم
-          </button>
-          <button
-            type="button"
-            onClick={() => onChange("")}
-            className="rounded-full border border-line px-3 py-1 text-[11px] font-bold text-danger transition hover:bg-danger/10"
-          >
-            إزالة
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          className="mt-2 rounded-full border border-line px-3 py-1 text-[11px] font-bold text-danger transition hover:bg-danger/10"
+        >
+          إزالة المجسم
+        </button>
       )}
 
       {reading && (

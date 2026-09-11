@@ -322,13 +322,38 @@ checked across yaw without a camera.
   Arms modelled too narrow sit inside the head mask and stay hidden even
   head-on.
 - Uncompressed geometry: Draco/meshopt decoders are not bundled.
-- Up to 8MB. It is stored inline with the product in IndexedDB, like the
-  photos, so no separate hosting is needed.
 - **Transparent (or deleted) lenses.** A model with solid lens geometry hides
   the customer's eyes, which defeats the point. AI generators in particular
   produce opaque lenses baked into a single material with the frame, so they
   can't be made see-through from code — the lens faces have to be deleted or
   given their own transparent material in Blender.
+
+### Where the model file lives
+
+Two routes, and the difference matters more than it looks:
+
+**Served from the site (preferred).** Put the `.glb` in
+`public/assets/frames/` and give the product its path
+(`/assets/frames/wayfarer.glb`) in `/admin`. The product stores only that
+string, so: no size limit worth worrying about, the file is gzipped over the
+wire, the browser caches it, and it is fetched **only when someone opens the
+try-on**. Files under `public/` are baked into the Docker image, so rebuild
+`web` after adding one.
+
+**Uploaded into the product (quick tests only).** The admin panel can also
+read the file and store it inline, capped by `MAX_MODEL_BYTES` (8MB) in
+`app/admin/page.tsx`. That cap is not a browser limit — it guards three real
+costs:
+
+1. It is stored as a base64 data URL, which inflates the file by a third (a
+   5.96MB model becomes a 7.9MB string, and JS strings are UTF-16 in memory).
+2. `lib/productStore.tsx`'s `idbGetAll` reads **every product in full on every
+   page load**, storefront included — not just when the try-on opens. Embedded
+   models therefore slow down pages that never render them.
+3. Size tracks triangle count, and the try-on renders the model while
+   MediaPipe is already using the GPU for face tracking.
+
+Raising the cap only makes (2) worse. Use the served route instead.
 
 ### Shrinking a generated model
 
