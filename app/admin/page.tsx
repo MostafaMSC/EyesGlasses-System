@@ -125,8 +125,29 @@ const EMPTY: FormState = {
 };
 
 export default function AdminPage() {
-  const { customProducts, addProduct, updateProduct, deleteProduct, hydrated } = useProductStore();
+  const {
+    customProducts,
+    addProduct,
+    updateProduct,
+    deleteProduct,
+    hydrated,
+    strandedLocalProducts,
+    importLocalProducts,
+  } = useProductStore();
   const { openTryOn } = useShopUI();
+
+  /** "checking" until the session cookie has been verified with the server. */
+  const [session, setSession] = useState<AdminSessionState>("checking");
+
+  useEffect(() => {
+    fetch("/api/admin/session")
+      .then((res) => res.json())
+      .then((body: { configured?: boolean; authenticated?: boolean }) => {
+        if (!body.configured) setSession("unconfigured");
+        else setSession(body.authenticated ? "in" : "out");
+      })
+      .catch(() => setSession("out"));
+  }, []);
 
   const [form, setForm] = useState<FormState>(EMPTY);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -383,6 +404,12 @@ export default function AdminPage() {
     URL.revokeObjectURL(url);
   };
 
+  // The catalogue is shared and server-stored now, so the panel stays shut
+  // until the password is accepted.
+  if (session !== "in") {
+    return <AdminLogin state={session} onAuthenticated={() => setSession("in")} />;
+  }
+
   return (
     <div className="py-8 sm:py-12">
       <Container>
@@ -392,13 +419,57 @@ export default function AdminPage() {
               لوحة إدارة النظارات
             </h1>
             <p className="mt-2 text-sm text-muted">
-              أضف نظارة جديدة وجربها على الكاميرا مباشرة. تُحفظ على هذا الجهاز فقط.
+              أضف نظارة جديدة وجربها على الكاميرا مباشرة. تُحفظ على السيرفر وتظهر لكل الزوار.
             </p>
           </div>
-          <Button href="/catalog" variant="secondary" size="sm">
-            عرض المتجر
-          </Button>
+          <div className="flex gap-2">
+            <Button href="/catalog" variant="secondary" size="sm">
+              عرض المتجر
+            </Button>
+            <button
+              type="button"
+              onClick={async () => {
+                await fetch("/api/admin/session", { method: "DELETE" });
+                setSession("out");
+              }}
+              className="rounded-full border border-line px-4 py-1.5 text-xs font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
+            >
+              خروج
+            </button>
+          </div>
         </div>
+
+        {strandedLocalProducts.length > 0 && (
+          // Products from before the catalogue moved to the server. They are
+          // invisible to customers where they are, and clearing browser data
+          // would lose them for good.
+          <div className="mb-6 rounded-2xl bg-accent/10 px-4 py-3 text-sm text-ink">
+            <p className="font-bold text-accent">
+              عندك {strandedLocalProducts.length} نظارة محفوظة في هذا المتصفح فقط
+            </p>
+            <p className="mt-1 text-xs leading-6 text-muted">
+              هذي أُضيفت قبل نقل الكاتالوج إلى السيرفر، فالزوار لا يرونها. انقلها مرة واحدة
+              لتصبح جزءاً من المتجر.
+            </p>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const n = await importLocalProducts();
+                  setMessage({ kind: "ok", text: `تم نقل ${n} نظارة إلى السيرفر.` });
+                } catch (err) {
+                  setMessage({
+                    kind: "error",
+                    text: err instanceof Error ? err.message : "تعذّر النقل.",
+                  });
+                }
+              }}
+              className="mt-3 rounded-full bg-accent px-4 py-1.5 text-xs font-bold text-white transition active:scale-95"
+            >
+              نقلها إلى السيرفر
+            </button>
+          </div>
+        )}
 
         {message && (
           <div
@@ -1350,6 +1421,87 @@ function Model3dField({
           جاري قراءة الملف…
         </p>
       )}
+    </div>
+  );
+}
+
+type AdminSessionState = "checking" | "out" | "in" | "unconfigured";
+
+/**
+ * Password gate. The password itself is only ever checked on the server (see
+ * lib/adminAuth.ts) — this just posts it and relies on the httpOnly session
+ * cookie that comes back.
+ */
+function AdminLogin({
+  state,
+  onAuthenticated,
+}: {
+  state: AdminSessionState;
+  onAuthenticated: () => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) throw new Error(body?.error ?? "تعذّر تسجيل الدخول.");
+      onAuthenticated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذّر تسجيل الدخول.");
+      setPassword("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="py-16">
+      <Container>
+        <div className="mx-auto max-w-sm rounded-3xl border border-line bg-surface-2 p-6">
+          <h1 className="font-display text-xl font-extrabold text-ink">لوحة إدارة النظارات</h1>
+
+          {state === "checking" && <p className="mt-3 text-sm text-muted">جاري التحقق…</p>}
+
+          {state === "unconfigured" && (
+            <p className="mt-3 text-sm leading-6 text-danger">
+              لم يتم تعيين <code>ADMIN_PASSWORD</code> على هذا السيرفر، فلوحة التحكم معطّلة.
+              أضفها إلى ملف <code>.env</code> وأعد تشغيل الحاوية.
+            </p>
+          )}
+
+          {(state === "out" || state === "in") && (
+            <form onSubmit={submit} className="mt-4">
+              <label className="block text-xs font-bold text-ink-soft">كلمة المرور</label>
+              <input
+                type="password"
+                value={password}
+                autoFocus
+                autoComplete="current-password"
+                onChange={(e) => setPassword(e.target.value)}
+                className={`${inputCls} mt-1`}
+              />
+              {error && <p className="mt-2 text-[11px] font-bold text-danger">{error}</p>}
+              <Button type="submit" variant="primary" size="md" className="mt-4 w-full" disabled={busy}>
+                {busy ? "جاري الدخول…" : "دخول"}
+              </Button>
+            </form>
+          )}
+
+          <Button href="/" variant="secondary" size="sm" className="mt-4 w-full">
+            رجوع للمتجر
+          </Button>
+        </div>
+      </Container>
     </div>
   );
 }

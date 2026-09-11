@@ -3,20 +3,49 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Loopback only: a reverse proxy in front terminates TLS and forwards
+      # here. Publishing on every interface would expose the app over plain
+      # HTTP, and the camera-based try-on needs HTTPS to work at all.
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
     environment:
       # Containers reach each other by service name on Docker's internal
-      # network, not localhost — this overrides the http://127.0.0.1:8001
-      # default in lib/frameProcessorProxy.ts.
+      # network, not localhost.
       - FRAME_PROCESSOR_URL=http://frame-processor:8001
+      - DATABASE_URL=postgres://${POSTGRES_USER:-abuthar}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-abuthar}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
     depends_on:
+      db:
+        condition: service_healthy
       frame-processor:
         condition: service_healthy
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-abuthar}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=${POSTGRES_DB:-abuthar}
+    # Not published to the host at all — only `web` talks to it, over the
+    # internal network. Nothing outside this project has any business
+    # reaching the database.
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # `web` creates its table on first request, so it must not start until
+      # Postgres is genuinely accepting connections.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-abuthar} -d ${POSTGRES_DB:-abuthar}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   frame-processor:
     build:
       context: services/frame-processor
+    restart: unless-stopped
     # Not published to the host on purpose — the web container reaches it
     # over the internal network above, and nothing outside this compose
     # project needs to reach it directly. Use
@@ -35,3 +64,8 @@ services:
       # real chance, or `web`'s depends_on gives up on it prematurely.
       start_period: 60s
       retries: 5
+
+volumes:
+  # Named, so `docker compose down` does not take the catalogue with it.
+  # Only `docker compose down -v` deletes it.
+  db-data:

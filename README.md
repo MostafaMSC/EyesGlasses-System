@@ -27,26 +27,101 @@ so use a tunnel such as `npx localtunnel --port 3000` for phone testing).
 
 ## Running with Docker
 
-No local Node or Python install needed — this runs the web app **and** the
-`services/frame-processor` microservice together, wired to each other over
-Docker's internal network automatically:
+No local Node, Python or Postgres install needed — this runs all three
+services (web, the `frame-processor` microservice, and the Postgres that holds
+the catalogue), wired together over Docker's internal network:
 
 ```bash
-docker compose up --build
+cp .env.example .env      # then fill in the two passwords
+docker compose up -d --build
 ```
 
-Open http://localhost:3000. `frame-processor` isn't published to the host in
-this setup (the web container reaches it internally) — use
-`services/frame-processor/docker-compose.yml` directly instead if you want
-just that one service running with a host-reachable port for `curl`/
-debugging (e.g. when the web app runs directly on the host, not Dockerized).
-First build takes a few minutes; `frame-processor`'s segmentation model is
-baked into its image at build time, so it needs no download at startup.
+Compose refuses to start until `POSTGRES_PASSWORD` and `ADMIN_PASSWORD` are
+set, rather than quietly booting with a default nobody changed.
 
-Stop with `Ctrl+C`, or `docker compose down` to also remove the containers.
+Open http://localhost:3000. Neither `db` nor `frame-processor` is published to
+the host — only `web` is, and only on `127.0.0.1`. Use
+`services/frame-processor/docker-compose.yml` directly if you want that one
+service reachable for `curl`/debugging. First build takes a few minutes;
+`frame-processor`'s segmentation model is baked into its image at build time,
+so it needs no download at startup.
 
-Camera-based try-on still needs `localhost` or HTTPS in the browser (see
-above) — that's a browser rule, unaffected by Docker.
+`docker compose down` removes the containers but **keeps** the catalogue — it
+lives in the named `db-data` volume. Only `docker compose down -v` deletes it.
+
+Camera-based try-on needs `localhost` or HTTPS in the browser (see above) —
+that's a browser rule, unaffected by Docker. See **Deploying to a server**
+below for the TLS part.
+
+## Deploying to a server
+
+The catalogue is real server state, so a deployment needs a little care.
+
+**1. Build and start**
+
+```bash
+git clone <repo> && cd EyesGlasses-System
+cp .env.example .env
+# fill in POSTGRES_PASSWORD and ADMIN_PASSWORD (openssl rand -base64 24)
+docker compose up -d --build
+```
+
+**2. Put TLS in front of it.** `web` listens on `127.0.0.1:3000` only, so it
+is not reachable from outside until a reverse proxy forwards to it. This is
+not optional: browsers block camera access on any origin that isn't
+`localhost` or HTTPS, so without a certificate the try-on — the whole point
+of the site — cannot run. With Caddy the entire config is two lines:
+
+```caddyfile
+shop.example.com {
+    reverse_proxy 127.0.0.1:3000
+}
+```
+
+Caddy obtains and renews the certificate itself. Point the domain's A record
+at the server first, or the certificate request fails.
+
+**3. Move the catalogue in.** Products added before this used to live in the
+admin browser's IndexedDB. Open `/admin` on the new server, log in, and if
+that browser still holds them you'll be offered a one-click **نقلها إلى
+السيرفر** import. Otherwise add frames normally — they now save to Postgres
+and every visitor sees them.
+
+**Updating later:**
+
+```bash
+git pull && docker compose up -d --build
+```
+
+The database volume is untouched by rebuilds.
+
+**Backups.** The catalogue is the one piece of state worth keeping:
+
+```bash
+docker compose exec -T db pg_dump -U abuthar abuthar | gzip > backup-$(date +%F).sql.gz
+```
+
+### What runs where
+
+| Service | Exposed | Needed by |
+| --- | --- | --- |
+| `web` | `127.0.0.1:3000`, via the reverse proxy | everyone |
+| `db` | internal only | `web` |
+| `frame-processor` | internal only | `/admin` photo upload only |
+
+`frame-processor` is only used when an admin uploads a product photo. If you
+prefer, leave it out of the server entirely (`docker compose up -d web db`)
+and prepare product photos on a local machine instead — the storefront and
+the try-on don't touch it.
+
+### Admin access
+
+`/admin` is protected by `ADMIN_PASSWORD` (see `lib/adminAuth.ts`): the
+password is only ever checked server-side, and the session is an httpOnly
+cookie holding an expiry plus an HMAC of it keyed by the password — so there
+is no session store to maintain, and changing the password immediately
+invalidates every existing session. Every write endpoint checks it; reads are
+public, because the catalogue is.
 
 ---
 
@@ -98,17 +173,16 @@ for the full pipeline (a Python port of the original client-side logic, with
 `rembg` replacing what used to be a hand-rolled/ONNX background removal
 step).
 
-**Important:** admin-added frames are stored in that browser's IndexedDB
-(`lib/idbProductStore.ts`) — moved off `localStorage` once products could
-carry up to three overlay images (front + left/right side). That means:
+Admin-added frames are saved to **Postgres**, so they are part of the real
+catalogue: visible to every visitor on every device, and unaffected by
+clearing browser data. `/admin` requires the `ADMIN_PASSWORD` from `.env`.
 
-- they persist across reloads on that device,
-- they are **not** visible on other devices or to other people,
-- clearing browser data removes them.
+They used to live in the admin browser's own IndexedDB, which meant nobody
+else could see them — if a browser still holds frames from that era, the
+admin panel offers a one-click import into the database.
 
-That's fine for demoing and for trying frames out. To make a frame a permanent
-part of the site, use **تصدير JSON** in the admin panel and paste the entry into
-the `products` array in `data/products.ts`.
+**تصدير JSON** is still there for taking a backup of the catalogue, or for
+pasting entries into `data/products.ts` to ship them as static defaults.
 
 ## Where to change things
 
@@ -119,6 +193,8 @@ the `products` array in `data/products.ts`.
 | Generated demo frame artwork | `lib/frameShapes.ts` |
 | Face tracking / placement math | `lib/faceGeometry.ts`, `lib/overlayPlacement.ts` |
 | 3D try-on (Three.js scene, head mask, model fitting) | `lib/threeTryOn/` |
+| Catalogue storage / API | `lib/db.ts`, `app/api/products/` |
+| Admin password + session | `lib/adminAuth.ts` |
 | Admin photo processing (background removal, lens detection) | `services/frame-processor/` (Python) |
 
 The WhatsApp number lives in exactly one place:
@@ -399,9 +475,9 @@ cp -r node_modules/@mediapipe/tasks-vision/wasm public/mediapipe/
 
 ## Notes
 
-- This is a **sales/demo MVP**: no payments, no accounts. Product data is
-  static and local. The only backend is the internal Python microservice
-  used by the admin panel's photo upload (`services/frame-processor`) —
-  everything else (storefront, live try-on) is fully client-side.
+- No payments and no customer accounts — orders go out over WhatsApp. The
+  backend is Postgres for the catalogue plus the internal Python microservice
+  used by the admin panel's photo upload (`services/frame-processor`); the
+  storefront and the live try-on otherwise run entirely in the browser.
 - All product data, prices and imagery are **demo values** and are meant to be
   replaced with the shop's real catalogue.

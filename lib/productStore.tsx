@@ -10,75 +10,74 @@ import {
   type ReactNode,
 } from "react";
 import { products as demoProducts, type Product } from "@/data/products";
-import { idbDelete, idbGetAll, idbPut } from "@/lib/idbProductStore";
-
-/** Legacy localStorage key, kept only to migrate existing products into IndexedDB once. */
-const LEGACY_STORAGE_KEY = "abu-thar-custom-products-v1";
+import { idbGetAll } from "@/lib/idbProductStore";
 
 interface ProductStore {
-  /** Demo catalogue plus anything added from the admin panel. */
+  /** Static catalogue plus everything saved from the admin panel. */
   products: Product[];
   customProducts: Product[];
-  /** False until the product database has been read (avoids hydration mismatch). */
+  /** False until the catalogue has been fetched (avoids hydration mismatch). */
   hydrated: boolean;
   addProduct: (product: Product) => Promise<void>;
   updateProduct: (id: string, product: Product) => Promise<void>;
   deleteProduct: (id: string) => Promise<void>;
   isCustom: (id: string) => boolean;
   getById: (id: string) => Product | undefined;
+  /**
+   * Products still sitting in this browser's IndexedDB from before the
+   * catalogue moved to the server, if any — so the admin panel can offer to
+   * import them once. Empty for everyone else.
+   */
+  strandedLocalProducts: Product[];
+  importLocalProducts: () => Promise<number>;
 }
 
 const ProductStoreContext = createContext<ProductStore | null>(null);
 
-function readLegacyStorage(): Product[] {
-  try {
-    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as Product[]) : [];
-  } catch {
-    return [];
-  }
+async function fetchProducts(): Promise<Product[]> {
+  const res = await fetch("/api/products", { cache: "no-store" });
+  if (!res.ok) throw new Error(`GET /api/products -> ${res.status}`);
+  const body = (await res.json()) as { products?: Product[] };
+  return body.products ?? [];
 }
 
-/**
- * Loads products from IndexedDB. The very first time this runs after
- * upgrading from the old localStorage-only store, IndexedDB is empty but a
- * real catalogue may still be sitting in localStorage — that gets copied
- * over once. The old key is left in place afterward (cheap insurance) rather
- * than deleted.
- */
-async function loadProducts(): Promise<Product[]> {
-  const fromDb = await idbGetAll<Product>();
-  if (fromDb.length > 0) return fromDb;
-
-  const legacy = readLegacyStorage();
-  if (legacy.length === 0) return [];
-
-  await Promise.all(legacy.map((p) => idbPut(p)));
-  return legacy;
+async function saveProduct(product: Product): Promise<void> {
+  const res = await fetch("/api/products", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(product),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `POST /api/products -> ${res.status}`);
+  }
 }
 
 export function ProductsProvider({ children }: { children: ReactNode }) {
   const [customProducts, setCustomProducts] = useState<Product[]>([]);
   const [hydrated, setHydrated] = useState(false);
+  const [strandedLocalProducts, setStrandedLocalProducts] = useState<Product[]>([]);
 
-  // Read after mount, never during render — IndexedDB doesn't exist on the
-  // server and reading it while rendering would desync hydration.
+  // Fetched after mount rather than rendered on the server: the catalogue is
+  // editable, so it must not be baked into a prerendered page.
   useEffect(() => {
     let cancelled = false;
-    loadProducts()
+    fetchProducts()
       .then((items) => {
         if (cancelled) return;
         setCustomProducts(items);
         setHydrated(true);
+        // Only worth looking for orphaned local products when the server has
+        // none — that's the "just upgraded, nothing migrated yet" case.
+        if (items.length === 0) {
+          idbGetAll<Product>()
+            .then((local) => !cancelled && setStrandedLocalProducts(local))
+            .catch(() => {});
+        }
       })
       .catch((err) => {
-        console.error("[productStore] Could not load products from IndexedDB", err);
+        console.error("[productStore] Could not load the catalogue", err);
         if (cancelled) return;
-        // Degrade to whatever localStorage still has rather than showing an
-        // empty catalogue — this session just won't persist new changes.
-        setCustomProducts(readLegacyStorage());
         setHydrated(true);
       });
     return () => {
@@ -87,18 +86,42 @@ export function ProductsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const addProduct = useCallback(async (product: Product) => {
+    // Saved first, then shown: unlike the old browser-local store this can
+    // genuinely fail, and a card that appears and then vanishes on reload is
+    // worse than an error.
+    await saveProduct(product);
     setCustomProducts((prev) => [...prev, product]);
-    await idbPut(product);
   }, []);
 
   const updateProduct = useCallback(async (id: string, product: Product) => {
+    await saveProduct(product);
     setCustomProducts((prev) => prev.map((p) => (p.id === id ? product : p)));
-    await idbPut(product);
   }, []);
 
   const deleteProduct = useCallback(async (id: string) => {
+    const res = await fetch(`/api/products/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(body?.error ?? `DELETE /api/products/${id} -> ${res.status}`);
+    }
     setCustomProducts((prev) => prev.filter((p) => p.id !== id));
-    await idbDelete(id);
+  }, []);
+
+  const importLocalProducts = useCallback(async () => {
+    const local = await idbGetAll<Product>();
+    if (local.length === 0) return 0;
+    const res = await fetch("/api/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(local),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(body?.error ?? `POST /api/products -> ${res.status}`);
+    }
+    setCustomProducts(await fetchProducts());
+    setStrandedLocalProducts([]);
+    return local.length;
   }, []);
 
   const value = useMemo<ProductStore>(() => {
@@ -112,8 +135,18 @@ export function ProductsProvider({ children }: { children: ReactNode }) {
       deleteProduct,
       isCustom: (id) => customProducts.some((p) => p.id === id),
       getById: (id) => all.find((p) => p.id === id),
+      strandedLocalProducts,
+      importLocalProducts,
     };
-  }, [customProducts, hydrated, addProduct, updateProduct, deleteProduct]);
+  }, [
+    customProducts,
+    hydrated,
+    addProduct,
+    updateProduct,
+    deleteProduct,
+    strandedLocalProducts,
+    importLocalProducts,
+  ]);
 
   return <ProductStoreContext.Provider value={value}>{children}</ProductStoreContext.Provider>;
 }
