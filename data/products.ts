@@ -64,6 +64,18 @@ export interface TryOnConfig {
   offsetY: number;
   rotationOffset: number;
   /**
+   * A GLB/GLTF model of this frame. When set, the live try-on can render the
+   * real thing in 3D — which is the only way the temple arms can genuinely
+   * swing with the head and pass behind the ears, instead of a flat image
+   * being tilted and faded.
+   *
+   * Modelling convention: facing +Z with the arms running back along -Z, so
+   * the model's front face is the lens plane and its horizontal/vertical
+   * centre is the lens-centre line. Any unit scale works — it is fitted to
+   * the face automatically — and `scale`/`offsetX`/`offsetY` still fine-tune.
+   */
+  model3d?: string;
+  /**
    * Side-profile photos (temple arm visible, unlike the arm-less front
    * overlay). When present, the live try-on cross-fades into these as the
    * head turns past a yaw threshold instead of showing the front cutout

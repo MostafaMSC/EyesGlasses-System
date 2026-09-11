@@ -45,6 +45,12 @@ const AVAILABILITY: { value: Availability; label: string }[] = [
 ];
 
 const MAX_IMAGE_BYTES = 1_500_000;
+/**
+ * Bigger than the photo limit because a textured eyewear GLB legitimately runs
+ * a few megabytes, and it is stored inline in IndexedDB as a data URL (which
+ * adds about a third on top).
+ */
+const MAX_MODEL_BYTES = 8_000_000;
 
 interface FormState {
   brand: string;
@@ -79,6 +85,7 @@ interface FormState {
   rightAnchorX: number;
   rightAnchorY: number;
   rightAspect: number;
+  model3d: string;
 }
 
 const EMPTY: FormState = {
@@ -114,6 +121,7 @@ const EMPTY: FormState = {
   rightAnchorX: 0.5,
   rightAnchorY: 0.5,
   rightAspect: 500 / 380,
+  model3d: "",
 };
 
 export default function AdminPage() {
@@ -192,6 +200,7 @@ export default function AdminPage() {
             rightImageGeometry: { aspect: form.rightAspect, anchorX: form.rightAnchorX, anchorY: form.rightAnchorY },
           }
         : {}),
+      ...(form.model3d ? { model3d: form.model3d } : {}),
     },
   });
 
@@ -359,6 +368,7 @@ export default function AdminPage() {
       rightAnchorX: t.rightImageGeometry?.anchorX ?? EMPTY.rightAnchorX,
       rightAnchorY: t.rightImageGeometry?.anchorY ?? EMPTY.rightAnchorY,
       rightAspect: t.rightImageGeometry?.aspect ?? EMPTY.rightAspect,
+      model3d: t.model3d ?? "",
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -646,6 +656,13 @@ export default function AdminPage() {
                 }
               />
             </div>
+
+            <hr className="my-6 border-line" />
+            <Model3dField
+              value={form.model3d}
+              onChange={(v) => set("model3d", v)}
+              onError={(text) => setMessage({ kind: "error", text })}
+            />
 
             <hr className="my-6 border-line" />
             <h3 className="mb-4 text-sm font-bold text-ink">ضبط الموضع على الوجه</h3>
@@ -1145,6 +1162,107 @@ function SidePhotoField({
         </p>
       )}
       {error && <p className="mt-2 text-[11px] font-bold text-danger">{error}</p>}
+    </div>
+  );
+}
+
+/**
+ * A GLB of the actual frame is what makes the live try-on hold up when the
+ * customer turns their head: the arms swing with the head and tuck behind the
+ * ears, which no amount of tilting a flat photo can imitate. Optional — a
+ * product without one still works exactly as before, from its photo.
+ */
+function Model3dField({
+  value,
+  onChange,
+  onError,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onError: (text: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [reading, setReading] = useState(false);
+
+  const handleFile = async (file: File) => {
+    if (file.size > MAX_MODEL_BYTES) {
+      onError(
+        `حجم المجسم كبير. الحد الأقصى ${Math.round(MAX_MODEL_BYTES / (1024 * 1024))} ميغابايت.`
+      );
+      return;
+    }
+    setReading(true);
+    try {
+      // Stored inline with the product, the same way photos are, so a frame
+      // added here needs no server upload and no extra hosting to work.
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      onChange(dataUrl);
+    } catch {
+      onError("تعذّر قراءة ملف المجسم.");
+    } finally {
+      setReading(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  return (
+    <div>
+      <h3 className="mb-2 text-sm font-bold text-ink">مجسم ثلاثي الأبعاد (اختياري)</h3>
+      <p className="mb-3 text-xs leading-6 text-muted">
+        ملف <code>.glb</code> للنظارة. عند إضافته تُعرض النظارة في التجربة المباشرة كمجسم حقيقي
+        يدور مع الرأس وتختفي أذرعه خلف الأذنين، بدل تحريك صورة مسطّحة. يجب أن يكون المجسم موجّهاً
+        للأمام مع امتداد الأذرع للخلف، ومركزه بين العدستين.
+      </p>
+
+      {value && (
+        <p className="mb-2 text-[11px] font-bold text-accent">
+          ✓ تم إضافة مجسم ({Math.round(value.length / 1024)} كيلوبايت)
+        </p>
+      )}
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".glb,.gltf,model/gltf-binary"
+        disabled={reading}
+        onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
+        className={
+          value
+            ? "hidden"
+            : "block w-full text-xs text-ink-soft file:me-2 file:rounded-full file:border-0 file:bg-surface-3 file:px-3 file:py-1.5 file:text-xs file:font-semibold disabled:opacity-50"
+        }
+      />
+
+      {value && (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            className="rounded-full border border-line px-3 py-1 text-[11px] font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
+          >
+            تغيير المجسم
+          </button>
+          <button
+            type="button"
+            onClick={() => onChange("")}
+            className="rounded-full border border-line px-3 py-1 text-[11px] font-bold text-danger transition hover:bg-danger/10"
+          >
+            إزالة
+          </button>
+        </div>
+      )}
+
+      {reading && (
+        <p className="mt-2 flex items-center gap-1.5 text-[11px] font-bold text-accent">
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+          جاري قراءة الملف…
+        </p>
+      )}
     </div>
   );
 }

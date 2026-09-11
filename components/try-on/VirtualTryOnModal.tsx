@@ -1,24 +1,35 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import dynamic from "next/dynamic";
 import { useShopUI } from "@/context/ShopUIContext";
-import { getProductVisualSrc } from "@/data/products";
+import { getProductVisualSrc, type TryOnConfig } from "@/data/products";
 import { useProductStore } from "@/lib/productStore";
 import { useFaceLandmarker } from "@/lib/useFaceLandmarker";
 import { useElementSize } from "@/lib/useElementSize";
 import { useBodyScrollLock } from "@/lib/useBodyScrollLock";
-import { computeFacePose, FacePoseSmoother, PitchCalibrator, type NormalizedPoint } from "@/lib/faceGeometry";
+import {
+  computeFacePose,
+  FacePoseSmoother,
+  PitchCalibrator,
+  type FacePose,
+  type NormalizedPoint,
+} from "@/lib/faceGeometry";
 import {
   computeCoverTransform,
   computeEarClip,
   computeOverlayPlacement,
+  DEFAULT_OVERLAY_GEOMETRY,
   earClipToCssPath,
   selectSideOverlay,
   type EarClip,
   type OverlayPlacement,
   type SideOverlaySelection,
 } from "@/lib/overlayPlacement";
+import type { GlassesOverlay3DHandle, OverlayRect } from "@/components/try-on/GlassesOverlay3D";
+// Type-only, so this never pulls Three.js into this module's bundle.
+import type { MediapipeMatrix } from "@/lib/threeTryOn/faceMatrix";
 import { loadImage } from "@/lib/loadImage";
 import { CONTACT_SHADOW, edgeFade, maskedOverlayCanvas, sideBlendWeight } from "@/lib/overlayAppearance";
 import { openWhatsAppOrder } from "@/lib/whatsapp";
@@ -28,6 +39,17 @@ import { CameraControls } from "@/components/try-on/CameraControls";
 import { CapturePreview } from "@/components/try-on/CapturePreview";
 import { IconClose } from "@/components/ui/Icons";
 import { Button } from "@/components/ui/Button";
+
+/**
+ * Three.js and the whole 3D stack are a few hundred KB — loaded only once
+ * someone actually opens a 3D try-on, never on normal browsing, the same way
+ * `useFaceLandmarker` defers the MediaPipe model. `ssr: false` because it
+ * needs a real canvas and a WebGL context.
+ */
+const GlassesOverlay3D = dynamic(
+  () => import("@/components/try-on/GlassesOverlay3D").then((m) => m.GlassesOverlay3D),
+  { ssr: false }
+);
 
 type PermissionState = "idle" | "requesting" | "granted" | "denied" | "unavailable" | "unsupported";
 type FaceState = "searching" | "tracking" | "multiple";
@@ -39,6 +61,20 @@ type FaceState = "searching" | "tracking" | "multiple";
  * Only treat tracking as truly lost after it's been missing this long.
  */
 const NO_FACE_GRACE_MS = 400;
+
+/** Lens-centre span as a fraction of the generated frame artwork's width. */
+const DEFAULT_LENS_SPAN_FRAC =
+  DEFAULT_OVERLAY_GEOMETRY.lensRightX - DEFAULT_OVERLAY_GEOMETRY.lensLeftX;
+
+/**
+ * How many tracked frames may arrive without a head-pose matrix before 3D
+ * gives up and hands back to the 2D overlay. The bundled face model does
+ * produce one, so this only trips on an unexpected model/runtime — but
+ * silently showing nothing would be a baffling way to fail.
+ */
+const MISSING_MATRIX_LIMIT = 30;
+
+type RenderMode = "2d" | "3d";
 
 /**
  * Draws one overlay image (front or side) into the capture canvas at the
@@ -105,12 +141,24 @@ export function VirtualTryOnModal() {
   const [stageRef, stageSize] = useElementSize<HTMLDivElement>();
   const stageSizeRef = useRef(stageSize);
 
+  const overlay3dRef = useRef<GlassesOverlay3DHandle>(null);
+  const missingMatrixCountRef = useRef(0);
+
   const [permission, setPermission] = useState<PermissionState>("idle");
   const [faceState, setFaceState] = useState<FaceState>("searching");
   const [placement, setPlacement] = useState<OverlayPlacement | null>(null);
   const [sideOverlay, setSideOverlay] = useState<SideOverlaySelection | null>(null);
   const [earClip, setEarClip] = useState<EarClip | null>(null);
   const [captured, setCaptured] = useState<string | null>(null);
+  const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
+  /** Null until the user picks a mode, so switching product keeps their choice. */
+  const [chosenMode, setChosenMode] = useState<RenderMode | null>(null);
+
+  // A product with a real 3D model is best shown in 3D; a flat photo still
+  // looks more like itself as a 2D cutout than as a generic placeholder mesh.
+  const mode: RenderMode = chosenMode ?? (product?.tryOn.model3d ? "3d" : "2d");
+  const is3d = mode === "3d";
+  const modeRef = useRef(is3d);
 
   useEffect(() => {
     productRef.current = product;
@@ -118,6 +166,28 @@ export function VirtualTryOnModal() {
   useEffect(() => {
     stageSizeRef.current = stageSize;
   }, [stageSize]);
+  useEffect(() => {
+    modeRef.current = is3d;
+  }, [is3d]);
+
+  /**
+   * The rectangle the camera feed actually covers. `object-fit: cover` crops
+   * it, so this is usually wider than the stage — the 3D canvas has to match
+   * it exactly, or the render and the face drift apart.
+   */
+  const overlayRect = useMemo<OverlayRect | null>(() => {
+    if (!videoSize.width || !videoSize.height || !stageSize.width || !stageSize.height) return null;
+    const { scale, offsetX, offsetY } = computeCoverTransform(
+      { videoWidth: videoSize.width, videoHeight: videoSize.height },
+      stageSize
+    );
+    return {
+      left: -offsetX,
+      top: -offsetY,
+      width: videoSize.width * scale,
+      height: videoSize.height * scale,
+    };
+  }, [videoSize, stageSize]);
 
   const requestCamera = useCallback((onCancelledRef: { cancelled: boolean }) => {
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
@@ -155,6 +225,7 @@ export function VirtualTryOnModal() {
       smootherRef.current.reset();
       pitchCalibratorRef.current.reset();
       lastFaceSeenAtRef.current = null;
+      missingMatrixCountRef.current = 0;
       queueMicrotask(() => {
         setPermission("idle");
         setCaptured(null);
@@ -169,6 +240,46 @@ export function VirtualTryOnModal() {
       cancelledRef.cancelled = true;
     };
   }, [isOpen, requestCamera]);
+
+  /**
+   * Feeds one tracked frame to the 3D overlay. Position and size come from
+   * the landmark-derived pose (so all of the 2D path's tuning still applies),
+   * while rotation and depth come from MediaPipe's head-pose matrix.
+   */
+  const updateThreeOverlay = useCallback(
+    (
+      pose: FacePose,
+      tryOn: TryOnConfig,
+      video: HTMLVideoElement,
+      matrixData: MediapipeMatrix | undefined,
+      timestampMs: number
+    ) => {
+      const placed = matrixData
+        ? overlay3dRef.current?.update({
+            matrixData,
+            timestampMs,
+            anchorU: pose.anchorX / video.videoWidth,
+            anchorV: pose.anchorY / video.videoHeight,
+            // Same expression the 2D path uses to size the overlay, so
+            // toggling 2D↔3D doesn't change how big the frame looks.
+            lensSpanFrac: (pose.width * tryOn.scale * DEFAULT_LENS_SPAN_FRAC) / video.videoWidth,
+            faceWidthFrac: pose.templeWidth / video.videoWidth,
+            offsetX: tryOn.offsetX,
+            offsetY: tryOn.offsetY,
+            rollOffsetDeg: tryOn.rotationOffset,
+          })
+        : overlay3dRef.current?.update(null);
+
+      // `undefined` means the lazy overlay hasn't mounted yet — not a failure.
+      if (placed === false && ++missingMatrixCountRef.current === MISSING_MATRIX_LIMIT) {
+        console.warn("[try-on] No usable head-pose matrix — falling back to the 2D overlay.");
+        setChosenMode("2d");
+      } else if (placed) {
+        missingMatrixCountRef.current = 0;
+      }
+    },
+    []
+  );
 
   // Detection loop.
   useEffect(() => {
@@ -194,6 +305,7 @@ export function VirtualTryOnModal() {
             setPlacement(null);
             setSideOverlay(null);
             setEarClip(null);
+            overlay3dRef.current?.update(null);
           }
           // Else: within the grace window, hold the last placement as-is.
         } else {
@@ -206,15 +318,27 @@ export function VirtualTryOnModal() {
             pitchCalibratorRef.current
           );
           const pose = smootherRef.current.next(rawPose, now);
+
           if (pose && currentProduct && size.width && size.height) {
-            const nextPlacement = computeOverlayPlacement(pose, currentProduct.tryOn, video, size);
-            setPlacement(nextPlacement);
-            setSideOverlay(selectSideOverlay(pose, currentProduct.tryOn, video, size));
-            setEarClip(nextPlacement ? computeEarClip(pose, nextPlacement, video, size) : null);
+            if (modeRef.current) {
+              updateThreeOverlay(
+                pose,
+                currentProduct.tryOn,
+                video,
+                result?.facialTransformationMatrixes?.[0],
+                now
+              );
+            } else {
+              const nextPlacement = computeOverlayPlacement(pose, currentProduct.tryOn, video, size);
+              setPlacement(nextPlacement);
+              setSideOverlay(selectSideOverlay(pose, currentProduct.tryOn, video, size));
+              setEarClip(nextPlacement ? computeEarClip(pose, nextPlacement, video, size) : null);
+            }
           } else {
             setPlacement(null);
             setSideOverlay(null);
             setEarClip(null);
+            overlay3dRef.current?.update(null);
           }
         }
       }
@@ -224,7 +348,7 @@ export function VirtualTryOnModal() {
 
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [isOpen, permission, detect]);
+  }, [isOpen, permission, detect, updateThreeOverlay]);
 
   const retryPermission = useCallback(() => {
     requestCamera({ cancelled: false });
@@ -247,6 +371,18 @@ export function VirtualTryOnModal() {
     ctx.translate(size.width, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(video, -offsetX, -offsetY, video.videoWidth * scale, video.videoHeight * scale);
+
+    if (is3d) {
+      // The 3D canvas already covers exactly this rectangle on screen, so the
+      // same destination rectangle reproduces the live preview one-for-one.
+      const glCanvas = overlay3dRef.current?.captureCanvas();
+      if (glCanvas) {
+        ctx.drawImage(glCanvas, -offsetX, -offsetY, video.videoWidth * scale, video.videoHeight * scale);
+      }
+      ctx.restore();
+      setCaptured(canvas.toDataURL("image/png"));
+      return;
+    }
 
     if (placement) {
       const blend = sideOverlay ? sideBlendWeight(placement.yawDeg) : 0;
@@ -307,7 +443,15 @@ export function VirtualTryOnModal() {
                   <p className="text-sm font-bold leading-tight text-white">تجربة النظارة</p>
                   <p className="text-[10px] leading-tight text-white/60">{product.brand} — {product.name}</p>
                 </div>
-                <span className="w-10" />
+                <button
+                  onClick={() => setChosenMode(is3d ? "2d" : "3d")}
+                  className={`glass-dark flex h-10 w-10 items-center justify-center rounded-full text-[11px] font-bold transition active:scale-95 ${
+                    is3d ? "text-white ring-1 ring-white/60" : "text-white/70"
+                  }`}
+                  aria-label={is3d ? "التبديل إلى العرض ثنائي الأبعاد" : "التبديل إلى العرض ثلاثي الأبعاد"}
+                >
+                  {is3d ? "3D" : "2D"}
+                </button>
               </div>
 
               <div
@@ -320,14 +464,24 @@ export function VirtualTryOnModal() {
                     playsInline
                     muted
                     className="absolute inset-0 h-full w-full object-cover"
+                    onLoadedMetadata={(event) => {
+                      const el = event.currentTarget;
+                      setVideoSize({ width: el.videoWidth, height: el.videoHeight });
+                    }}
                   />
-                  <GlassesOverlay
-                    product={product}
-                    placement={placement}
-                    sideSrc={sideOverlay?.src}
-                    sidePlacement={sideOverlay?.placement}
-                    earClipPath={earClipToCssPath(earClip)}
-                  />
+                  {is3d ? (
+                    // Mirrored along with the video by the wrapper above, so
+                    // the 3D render and the face it sits on stay in step.
+                    <GlassesOverlay3D ref={overlay3dRef} product={product} rect={overlayRect} />
+                  ) : (
+                    <GlassesOverlay
+                      product={product}
+                      placement={placement}
+                      sideSrc={sideOverlay?.src}
+                      sidePlacement={sideOverlay?.placement}
+                      earClipPath={earClipToCssPath(earClip)}
+                    />
+                  )}
                 </div>
 
                 {permission === "granted" && faceState !== "tracking" && (

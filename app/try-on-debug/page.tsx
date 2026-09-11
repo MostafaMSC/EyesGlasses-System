@@ -9,14 +9,21 @@
  * be tuned. Visit /try-on-debug.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Euler, MathUtils, Matrix4 } from "three";
 import { useProductStore } from "@/lib/productStore";
 import { computeFacePose, PitchCalibrator, type NormalizedPoint } from "@/lib/faceGeometry";
-import { computeOverlayPlacement, overlayTransform } from "@/lib/overlayPlacement";
+import { computeOverlayPlacement, DEFAULT_OVERLAY_GEOMETRY, overlayTransform } from "@/lib/overlayPlacement";
 import { GlassesOverlay } from "@/components/try-on/GlassesOverlay";
+import { GlassesOverlay3D, type GlassesOverlay3DHandle } from "@/components/try-on/GlassesOverlay3D";
+import { MEDIAPIPE_VERTICAL_FOV_DEG } from "@/lib/threeTryOn/faceMatrix";
 
 const VIDEO_W = 640;
 const VIDEO_H = 480;
+
+const LENS_SPAN_FRAC = DEFAULT_OVERLAY_GEOMETRY.lensRightX - DEFAULT_OVERLAY_GEOMETRY.lensLeftX;
+/** Assumed real temple-to-temple width, to put the synthetic head at a believable distance. */
+const FACE_WIDTH_CM = 14;
 
 // Canonical head model in face-local units (half head width = 1).
 // x: right, y: down, z: toward camera. Eye line is y = 0.
@@ -77,6 +84,8 @@ export default function TryOnDebugPage() {
   const [headHalfWidthPx, setHeadHalfWidthPx] = useState(110);
   const [productId, setProductId] = useState(products[0]?.id ?? "");
   const [showIris, setShowIris] = useState(true);
+  const [render3d, setRender3d] = useState(false);
+  const overlay3dRef = useRef<GlassesOverlay3DHandle>(null);
 
   // Falls back if the selected product was deleted from the admin panel.
   const product = products.find((p) => p.id === productId) ?? products[0];
@@ -117,6 +126,66 @@ export default function TryOnDebugPage() {
       : null;
     return { landmarks: lm, pose: p, placement: pl };
   }, [yawDeg, rollDeg, pitchDeg, headHalfWidthPx, product, showIris]);
+
+  /**
+   * Drives the 3D overlay from the same synthetic pose.
+   *
+   * The rotation here is *reconstructed* from the slider angles — in a real
+   * session it comes from MediaPipe's head-pose matrix instead, so the exact
+   * sign conventions below are only as good as this reconstruction. What this
+   * does verify without a camera: the model loads and fits, the camera
+   * intrinsics put it on the eyes at the right size, and the head mask hides
+   * the temple arms as the head turns.
+   */
+  useEffect(() => {
+    if (!render3d || !pose || !product) return;
+    let raf = 0;
+
+    const faceWidthFrac = pose.templeWidth / VIDEO_W;
+
+    // Distance that makes a FACE_WIDTH_CM-wide head project to the width the
+    // synthetic landmarks actually span, so perspective and the head mask are
+    // physically consistent with the drawn face.
+    const aspect = VIDEO_W / VIDEO_H;
+    const tanHalfFov = Math.tan(MathUtils.DEG2RAD * MEDIAPIPE_VERTICAL_FOV_DEG * 0.5);
+    const distance = FACE_WIDTH_CM / (faceWidthFrac * 2 * tanHalfFov * aspect);
+
+    const matrix = new Matrix4().makeRotationFromEuler(
+      // Three.js is y-up with +Z toward the camera; the synthetic head model
+      // above is y-down, hence the inverted pitch and roll.
+      new Euler(
+        MathUtils.DEG2RAD * -pitchDeg,
+        MathUtils.DEG2RAD * yawDeg,
+        MathUtils.DEG2RAD * -rollDeg,
+        "YXZ"
+      )
+    );
+    matrix.setPosition(0, 0, -distance);
+
+    const input = {
+      // Shaped like MediaPipe's payload, column-major as Three.js stores it.
+      matrixData: { rows: 4, columns: 4, data: matrix.toArray() },
+      timestampMs: 0,
+      anchorU: pose.anchorX / VIDEO_W,
+      anchorV: pose.anchorY / VIDEO_H,
+      lensSpanFrac: (pose.width * product.tryOn.scale * LENS_SPAN_FRAC) / VIDEO_W,
+      faceWidthFrac,
+      offsetX: product.tryOn.offsetX,
+      offsetY: product.tryOn.offsetY,
+      rollOffsetDeg: product.tryOn.rotationOffset,
+    };
+
+    // Kept running rather than pushed once: the model arrives asynchronously,
+    // and the overlay draws nothing until it is there. A live timestamp lets
+    // the pose smoother advance, so a slider change eases in as it would on a
+    // real head rather than snapping.
+    const tick = () => {
+      overlay3dRef.current?.update({ ...input, timestampMs: performance.now() });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [render3d, pose, landmarks, product, headHalfWidthPx, yawDeg, pitchDeg, rollDeg]);
 
   const pt = (i: number) =>
     landmarks[i] ? { x: landmarks[i].x * VIDEO_W, y: landmarks[i].y * VIDEO_H } : null;
@@ -170,7 +239,15 @@ export default function TryOnDebugPage() {
             <circle cx={chin.x} cy={chin.y} r={4} fill="#ff6b6b" />
           </svg>
 
-          <GlassesOverlay product={product} placement={placement} />
+          {render3d ? (
+            <GlassesOverlay3D
+              ref={overlay3dRef}
+              product={product}
+              rect={{ left: 0, top: 0, width: VIDEO_W, height: VIDEO_H }}
+            />
+          ) : (
+            <GlassesOverlay product={product} placement={placement} />
+          )}
         </div>
 
         <div className="min-w-[320px] font-mono text-xs">
@@ -194,9 +271,14 @@ export default function TryOnDebugPage() {
           <Slider label="pitch (input, head tilt)" value={pitchDeg} min={-60} max={60} onChange={setPitchDeg} />
           <Slider label="head half-width px" value={headHalfWidthPx} min={50} max={200} onChange={setHeadHalfWidthPx} />
 
-          <label className="mb-4 flex items-center gap-2">
+          <label className="mb-2 flex items-center gap-2">
             <input type="checkbox" checked={showIris} onChange={(e) => setShowIris(e.target.checked)} />
             iris landmarks available
+          </label>
+
+          <label className="mb-4 flex items-center gap-2">
+            <input type="checkbox" checked={render3d} onChange={(e) => setRender3d(e.target.checked)} />
+            render in 3D (GLB / placeholder mesh + head mask)
           </label>
 
           <pre className="whitespace-pre-wrap rounded bg-white/10 p-3 leading-5">

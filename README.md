@@ -118,6 +118,7 @@ the `products` array in `data/products.ts`.
 | Products, prices, colours, availability, try-on tuning | `data/products.ts` |
 | Generated demo frame artwork | `lib/frameShapes.ts` |
 | Face tracking / placement math | `lib/faceGeometry.ts`, `lib/overlayPlacement.ts` |
+| 3D try-on (Three.js scene, head mask, model fitting) | `lib/threeTryOn/` |
 | Admin photo processing (background removal, lens detection) | `services/frame-processor/` (Python) |
 
 The WhatsApp number lives in exactly one place:
@@ -203,7 +204,8 @@ tryOn: {
 A development harness is available at **`/try-on-debug`** (not linked from the
 site). It feeds a synthetic face through the real tracking pipeline with
 sliders for yaw, roll and head size, and prints the computed pose — use it to
-check a new asset's alignment without needing a camera.
+check a new asset's alignment without needing a camera. Tick **render in 3D**
+to check a GLB the same way.
 
 ### How the cutout is actually made
 
@@ -259,6 +261,69 @@ hang the page on a slow connection. See
    front image into the relevant side image as yaw increases — a real photo
    with the temple arm visible, not just an implied fade. Products without
    side photos render exactly as front-only, unchanged.
+
+## The 3D try-on
+
+A flat image can be tilted, faded and clipped, but it has no depth — so it
+never really turns with the head, and the temple arms can only ever be
+*approximated* going behind the ear. Products with a 3D model
+(`tryOn.model3d`, a `.glb` uploaded in `/admin`) are rendered as real
+geometry instead, in `lib/threeTryOn/`:
+
+1. A **transparent WebGL canvas** sits over the video, positioned to cover
+   exactly the rectangle the camera feed occupies (`object-fit: cover` crops
+   it, so this is usually wider than the stage). Both live inside the same
+   mirrored wrapper, so the render and the face stay in step — and the mirror
+   is correct for a selfie view, the same way a real mirror is.
+2. The **head-pose matrix** comes from MediaPipe, which fits its canonical
+   metric head to the landmarks and hands back a 4x4 transform. Its rotation
+   drives the scene's anchor object; its translation gives the distance to the
+   head. The Three.js `PerspectiveCamera` is built with the intrinsics that
+   matrix was solved against (63° vertical FOV, centimetre units) — if the
+   camera disagrees, the frame drifts off the eyes as the head moves
+   off-centre.
+3. **Position and size stay landmark-driven.** The frame is placed on the ray
+   through the same tuned anchor the 2D path uses (pupil line pulled toward
+   the nose bridge) at the head's depth, and scaled every frame so the model's
+   lens centres land on the measured lens-centre span. That means moving
+   closer or further is tracked continuously, per-product `scale`/`offsetX`/
+   `offsetY` keep working, and toggling 2D↔3D doesn't change how big the frame
+   looks.
+4. **Occlusion** is an invisible ellipsoid head mask — `colorWrite: false`,
+   so it writes depth but paints nothing, letting the camera feed show through
+   while punching away the frame's own pixels behind it. That is what makes
+   the temple arms genuinely pass behind the ears instead of floating over
+   hair. It is sized from the face's own measured temple width (see
+   `HEAD_MASK` in `lib/threeTryOn/tryOnScene.ts`) — the constant to adjust if
+   arms ever vanish too early or show through the head.
+
+A **2D/3D toggle** in the try-on header switches between the two renderers, so
+the same face can be compared side by side. Products with a `model3d` default
+to 3D; everything else defaults to the 2D cutout. If MediaPipe ever stops
+returning a pose matrix, 3D hands back to 2D on its own rather than showing
+nothing.
+
+Products without a GLB still render in 3D if you toggle it on, using a
+**placeholder mesh** built from the product's `frameShape` and colours
+(`lib/threeTryOn/proceduralFrame.ts`). It will never match a real frame's
+design — it exists so tracking can be judged before anything is modelled.
+
+`/try-on-debug` has a **render in 3D** checkbox that drives all of this from
+synthetic landmarks, so placement, fitting and the arm occlusion can be
+checked across yaw without a camera.
+
+### Requirements for a try-on GLB
+
+- Modelled **facing +Z with the temple arms running back along −Z**, so the
+  front face is the lens plane and the horizontal/vertical centre is the
+  lens-centre line. Any unit scale works — it is fitted to the face
+  automatically.
+- The arms must run at the **true width of the head** and reach past the ear.
+  Arms modelled too narrow sit inside the head mask and stay hidden even
+  head-on.
+- Uncompressed geometry: Draco/meshopt decoders are not bundled.
+- Up to 8MB. It is stored inline with the product in IndexedDB, like the
+  photos, so no separate hosting is needed.
 
 ### Updating the MediaPipe assets
 

@@ -74,7 +74,11 @@ async function createLandmarker(wasmPath: string, modelPath: string) {
       runningMode: "VIDEO",
       numFaces: 1,
       outputFaceBlendshapes: false,
-      outputFacialTransformationMatrixes: false,
+      // The 4x4 head-pose matrix the 3D try-on renders from. MediaPipe solves
+      // it by fitting its canonical metric head to the landmarks, which gives
+      // a real 3D rotation — the thing the 2D overlay could only approximate
+      // with a CSS tilt. Cheap to ask for: it comes out of the same inference.
+      outputFacialTransformationMatrixes: true,
     });
   });
 }

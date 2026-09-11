@@ -18,6 +18,13 @@ export interface FacePose {
   /** Rendered overlay size in video pixel coordinates. */
   width: number;
   height: number;
+  /**
+   * Temple-to-temple face width in video pixels, with yaw foreshortening
+   * removed. Unlike `width` (which is the frame artwork's size) this is the
+   * head itself, which is what the 3D try-on's invisible head mask is sized
+   * from — see lib/threeTryOn/tryOnScene.ts.
+   */
+  templeWidth: number;
   /** Head rotation in degrees. */
   roll: number;
   yaw: number;
@@ -258,7 +265,18 @@ export function computeFacePose(
   const earBoundaryL = avg3(templeL, upperTempleL, jawL);
   const earBoundaryR = avg3(templeR, upperTempleR, jawR);
 
-  return { anchorX, anchorY, width, height, roll, yaw, pitch, earBoundaryL, earBoundaryR };
+  return {
+    anchorX,
+    anchorY,
+    width,
+    height,
+    templeWidth: templeWidth / yawCos,
+    roll,
+    yaw,
+    pitch,
+    earBoundaryL,
+    earBoundaryR,
+  };
 }
 
 function scalePoint(p: Vec2 | null, videoWidth: number, videoHeight: number): Vec2 | null {
@@ -269,6 +287,7 @@ type PoseChannel =
   | "anchorX"
   | "anchorY"
   | "width"
+  | "templeWidth"
   | "roll"
   | "yaw"
   | "pitch"
@@ -326,6 +345,7 @@ export class FacePoseSmoother {
       anchorX: { minCutoff: 1.4, beta: 0.06 },
       anchorY: { minCutoff: 1.4, beta: 0.06 },
       width: { minCutoff: 0.7, beta: 0.02 },
+      templeWidth: { minCutoff: 0.7, beta: 0.02 },
       roll: { minCutoff: 1.0, beta: 0.04 },
       yaw: { minCutoff: 0.8, beta: 0.03 },
       pitch: { minCutoff: 0.8, beta: 0.03 },
@@ -372,6 +392,7 @@ export class FacePoseSmoother {
       anchorY: this.smoother.smooth("anchorY", pose.anchorY, timestampMs),
       width,
       height: width * VIEWBOX_ASPECT,
+      templeWidth: this.smoother.smooth("templeWidth", pose.templeWidth, timestampMs),
       roll: this.smoother.smooth("roll", pose.roll, timestampMs),
       yaw: this.smoother.smooth("yaw", pose.yaw, timestampMs),
       pitch: this.smoother.smooth("pitch", pose.pitch, timestampMs),
