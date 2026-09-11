@@ -13,7 +13,12 @@ services:
       # Containers reach each other by service name on Docker's internal
       # network, not localhost.
       - FRAME_PROCESSOR_URL=http://frame-processor:8001
-      - DATABASE_URL=postgres://${POSTGRES_USER:-abuthar}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-abuthar}
+      # Passed as separate fields, not assembled into a connection string, so
+      # a password containing "/", "@" or ":" can't corrupt it.
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-abuthar}
+      - POSTGRES_DB=${POSTGRES_DB:-abuthar}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
     depends_on:
       db:

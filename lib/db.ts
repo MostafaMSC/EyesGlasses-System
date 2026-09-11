@@ -18,19 +18,32 @@ import type { Product } from "@/data/products";
 const globalForDb = globalThis as unknown as { productPool?: Pool };
 
 function createPool(): Pool {
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
+  // The admin panel stores photos as data URLs, so a single row can be a few
+  // hundred KB; a small pool is plenty and keeps memory predictable.
+  const shared = { max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 };
+
+  // A single DATABASE_URL wins when given, for a managed/external database.
+  if (process.env.DATABASE_URL) {
+    return new Pool({ ...shared, connectionString: process.env.DATABASE_URL });
+  }
+
+  // Otherwise the parts are read separately rather than assembled into a URL.
+  // A password is free to contain "/", "@" or ":" — all of which would change
+  // where a connection string is parsed, failing with an error that points
+  // nowhere near the real cause.
+  const password = process.env.POSTGRES_PASSWORD;
+  if (!password) {
     throw new Error(
-      "DATABASE_URL is not set — the product catalogue needs Postgres. See .env.example."
+      "No database configured — set POSTGRES_PASSWORD (or DATABASE_URL). See .env.example."
     );
   }
   return new Pool({
-    connectionString,
-    // The admin panel stores photos as data URLs, so a single row can be a
-    // few hundred KB; a small pool is plenty and keeps memory predictable.
-    max: 5,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
+    ...shared,
+    host: process.env.POSTGRES_HOST || "db",
+    port: Number(process.env.POSTGRES_PORT || 5432),
+    user: process.env.POSTGRES_USER || "abuthar",
+    database: process.env.POSTGRES_DB || "abuthar",
+    password,
   });
 }
 
