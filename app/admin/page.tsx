@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { frameSvgDataUri, type FrameShape } from "@/lib/frameShapes";
 import { getProductVisualSrc, type Availability, type Category, type Product } from "@/data/products";
@@ -758,6 +758,19 @@ export default function AdminPage() {
               value={form.model3d}
               onChange={(v) => set("model3d", v)}
               onError={(text) => setMessage({ kind: "error", text })}
+              hasImage={Boolean(form.overlayImage)}
+              onThumbnail={({ dataUrl, geometry }) =>
+                // The renderer reports where the lenses actually landed, so
+                // the flat overlay lines up on the eyes without hand-tuning.
+                setForm((f) => ({
+                  ...f,
+                  overlayImage: dataUrl,
+                  lensLeftX: geometry.lensLeftX,
+                  lensRightX: geometry.lensRightX,
+                  lensY: geometry.lensY,
+                  imageAspect: geometry.aspect,
+                }))
+              }
             />
 
             <hr className="my-6 border-line" />
@@ -1285,10 +1298,15 @@ function Model3dField({
   value,
   onChange,
   onError,
+  hasImage,
+  onThumbnail,
 }: {
   value: string;
   onChange: (value: string) => void;
   onError: (text: string) => void;
+  /** Whether the product already has a picture, so we don't overwrite one. */
+  hasImage: boolean;
+  onThumbnail: (result: import("@/lib/threeTryOn/renderModelThumbnail").ModelThumbnail) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [reading, setReading] = useState(false);
@@ -1339,6 +1357,36 @@ function Model3dField({
         ? "ok"
         : "missing"
       : "checking";
+
+  const [rendering, setRendering] = useState(false);
+
+  /**
+   * Renders the model into a flat picture for the product card. Without one,
+   * a product whose only asset is a .glb shows the generic placeholder
+   * artwork everywhere except the camera — the model is invisible in the
+   * catalogue, which is where customers actually browse.
+   */
+  const makeThumbnail = useCallback(async () => {
+    if (!value) return;
+    setRendering(true);
+    try {
+      const { renderModelThumbnail } = await import("@/lib/threeTryOn/renderModelThumbnail");
+      onThumbnail(await renderModelThumbnail(value));
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "تعذّر توليد صورة من المجسم.");
+    } finally {
+      setRendering(false);
+    }
+  }, [value, onThumbnail, onError]);
+
+  // Generate it automatically the first time a model resolves, but never over
+  // an existing photo — a real product shot beats a render.
+  const autoRenderedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (pathCheck !== "ok" || hasImage || autoRenderedFor.current === value) return;
+    autoRenderedFor.current = value;
+    void makeThumbnail();
+  }, [pathCheck, hasImage, value, makeThumbnail]);
 
   const handleFile = async (file: File) => {
     if (file.size > MAX_MODEL_BYTES) {
@@ -1444,13 +1492,29 @@ function Model3dField({
       </details>
 
       {value && (
-        <button
-          type="button"
-          onClick={() => onChange("")}
-          className="mt-2 rounded-full border border-line px-3 py-1 text-[11px] font-bold text-danger transition hover:bg-danger/10"
-        >
-          إزالة المجسم
-        </button>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={makeThumbnail}
+            disabled={rendering || pathCheck === "missing"}
+            className="rounded-full border border-line px-3 py-1 text-[11px] font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink disabled:opacity-50"
+          >
+            {rendering ? "جاري التوليد…" : "توليد صورة من المجسم"}
+          </button>
+          <button
+            type="button"
+            onClick={() => onChange("")}
+            className="rounded-full border border-line px-3 py-1 text-[11px] font-bold text-danger transition hover:bg-danger/10"
+          >
+            إزالة المجسم
+          </button>
+        </div>
+      )}
+      {value && (
+        <p className="mt-1.5 text-[11px] leading-5 text-muted">
+          بطاقة المنتج في المتجر تحتاج صورة مسطّحة — تُولَّد من المجسم تلقائياً عند إضافته،
+          وتستبدلها أي صورة حقيقية ترفعها.
+        </p>
       )}
 
       {reading && (
