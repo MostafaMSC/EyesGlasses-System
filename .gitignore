@@ -44,4 +44,3 @@ next-env.d.ts
 services/frame-processor/venv/
 services/frame-processor/__pycache__/
 services/frame-processor/*.pyc
-
