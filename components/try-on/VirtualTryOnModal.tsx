@@ -151,8 +151,11 @@ export function VirtualTryOnModal() {
   const [earClip, setEarClip] = useState<EarClip | null>(null);
   const [captured, setCaptured] = useState<string | null>(null);
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
+  const videoSizeRef = useRef(videoSize);
   /** Null until the user picks a mode, so switching product keeps their choice. */
   const [chosenMode, setChosenMode] = useState<RenderMode | null>(null);
+  /** Set when 3D gave up on its own, so the reason isn't invisible. */
+  const [threeUnavailable, setThreeUnavailable] = useState(false);
 
   // A product with a real 3D model is best shown in 3D; a flat photo still
   // looks more like itself as a 2D cutout than as a generic placeholder mesh.
@@ -273,6 +276,9 @@ export function VirtualTryOnModal() {
       // `undefined` means the lazy overlay hasn't mounted yet — not a failure.
       if (placed === false && ++missingMatrixCountRef.current === MISSING_MATRIX_LIMIT) {
         console.warn("[try-on] No usable head-pose matrix — falling back to the 2D overlay.");
+        // Flipping the badge back to 2D without saying anything is
+        // indistinguishable from the toggle simply not working.
+        setThreeUnavailable(true);
         setChosenMode("2d");
       } else if (placed) {
         missingMatrixCountRef.current = 0;
@@ -292,6 +298,20 @@ export function VirtualTryOnModal() {
       const currentProduct = productRef.current;
 
       if (video && video.readyState >= 2) {
+        // Taken from the video itself each frame rather than from a
+        // `loadedmetadata` handler: the stream is attached imperatively after
+        // mount, so that event can land before React has wired anything up —
+        // and without a size the 3D canvas is left zero-sized and invisible,
+        // which looks exactly like the 3D mode "not working".
+        if (
+          video.videoWidth &&
+          (videoSizeRef.current.width !== video.videoWidth ||
+            videoSizeRef.current.height !== video.videoHeight)
+        ) {
+          videoSizeRef.current = { width: video.videoWidth, height: video.videoHeight };
+          setVideoSize(videoSizeRef.current);
+        }
+
         const now = performance.now();
         const result = detect(video, now);
         const faces = (result?.faceLandmarks ?? []) as NormalizedPoint[][];
@@ -444,7 +464,11 @@ export function VirtualTryOnModal() {
                   <p className="text-[10px] leading-tight text-white/60">{product.brand} — {product.name}</p>
                 </div>
                 <button
-                  onClick={() => setChosenMode(is3d ? "2d" : "3d")}
+                  onClick={() => {
+                    setThreeUnavailable(false);
+                    missingMatrixCountRef.current = 0;
+                    setChosenMode(is3d ? "2d" : "3d");
+                  }}
                   className={`glass-dark flex h-10 w-10 items-center justify-center rounded-full text-[11px] font-bold transition active:scale-95 ${
                     is3d ? "text-white ring-1 ring-white/60" : "text-white/70"
                   }`}
@@ -464,10 +488,6 @@ export function VirtualTryOnModal() {
                     playsInline
                     muted
                     className="absolute inset-0 h-full w-full object-cover"
-                    onLoadedMetadata={(event) => {
-                      const el = event.currentTarget;
-                      setVideoSize({ width: el.videoWidth, height: el.videoHeight });
-                    }}
                   />
                   {is3d ? (
                     // Mirrored along with the video by the wrapper above, so
@@ -483,6 +503,14 @@ export function VirtualTryOnModal() {
                     />
                   )}
                 </div>
+
+                {threeUnavailable && (
+                  <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-6">
+                    <p className="glass-dark rounded-full px-4 py-2 text-center text-xs font-semibold text-white">
+                      تعذّر تشغيل العرض ثلاثي الأبعاد على هذا الجهاز، تم الرجوع للعرض العادي
+                    </p>
+                  </div>
+                )}
 
                 {permission === "granted" && faceState !== "tracking" && (
                   <div className="pointer-events-none absolute inset-x-0 top-4 flex justify-center px-6">
