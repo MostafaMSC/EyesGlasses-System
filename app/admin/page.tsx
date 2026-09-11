@@ -1189,7 +1189,16 @@ function Model3dField({
    * Result of the last path check, tagged with the path it was for — so a
    * stale ✓ can't linger next to a path that has since been edited.
    */
-  const [checked, setChecked] = useState<{ path: string; ok: boolean } | null>(null);
+  const [checked, setChecked] = useState<{ path: string; ok: boolean; attempt: number } | null>(
+    null
+  );
+  /**
+   * Bumped to re-run the check. A model is usually added to `public/` and the
+   * container rebuilt *after* the path has been typed, and without this the
+   * "missing" verdict would stick until the text itself changed — telling you
+   * the file is absent long after you put it there.
+   */
+  const [attempt, setAttempt] = useState(0);
 
   /**
    * Confirms the path actually resolves to a file, rather than letting a typo
@@ -1201,20 +1210,22 @@ function Model3dField({
     let cancelled = false;
     // Debounced, since this runs on every keystroke of the path.
     const timer = setTimeout(() => {
-      fetch(value, { method: "HEAD" })
-        .then((res) => !cancelled && setChecked({ path: value, ok: res.ok }))
-        .catch(() => !cancelled && setChecked({ path: value, ok: false }));
+      // `no-store`: a 404 from before the model was added must not be served
+      // back out of the browser cache as if it were still true.
+      fetch(value, { method: "HEAD", cache: "no-store" })
+        .then((res) => !cancelled && setChecked({ path: value, ok: res.ok, attempt }))
+        .catch(() => !cancelled && setChecked({ path: value, ok: false, attempt }));
     }, 500);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [value, isEmbedded]);
+  }, [value, isEmbedded, attempt]);
 
   const pathCheck =
     isEmbedded || !value
       ? "idle"
-      : checked?.path === value
+      : checked?.path === value && checked.attempt === attempt
       ? checked.ok
         ? "ok"
         : "missing"
@@ -1282,10 +1293,21 @@ function Model3dField({
       {pathCheck === "ok" && (
         <p className="mt-1 text-[11px] font-bold text-accent">✓ الملف موجود على الموقع</p>
       )}
+      {pathCheck === "checking" && (
+        <p className="mt-1 text-[11px] font-bold text-muted">… جاري التحقق من المسار</p>
+      )}
       {pathCheck === "missing" && (
         <p className="mt-1 text-[11px] font-bold text-danger">
-          ✕ لا يوجد ملف على هذا المسار. تأكد أنك نسخت الملف إلى{" "}
-          <code>public/assets/frames/</code> وأعدت بناء الحاوية.
+          ✕ لا يوجد ملف على هذا المسار. شغّل <code>npm run prepare-model</code> ثم{" "}
+          <code>docker compose up -d --build web</code>، وبعدها
+          <button
+            type="button"
+            onClick={() => setAttempt((n) => n + 1)}
+            className="mx-1 underline underline-offset-2 hover:no-underline"
+          >
+            أعد الفحص
+          </button>
+          .
         </p>
       )}
 
