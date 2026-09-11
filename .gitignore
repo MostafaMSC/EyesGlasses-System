@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Python microservice (services/frame-processor)
+services/frame-processor/venv/
+services/frame-processor/__pycache__/
+services/frame-processor/*.pyc
+

@@ -11,8 +11,11 @@ import { useBodyScrollLock } from "@/lib/useBodyScrollLock";
 import { computeFacePose, FacePoseSmoother, PitchCalibrator, type NormalizedPoint } from "@/lib/faceGeometry";
 import {
   computeCoverTransform,
+  computeEarClip,
   computeOverlayPlacement,
+  earClipToCssPath,
   selectSideOverlay,
+  type EarClip,
   type OverlayPlacement,
   type SideOverlaySelection,
 } from "@/lib/overlayPlacement";
@@ -47,7 +50,8 @@ function drawOverlayImage(
   ctx: CanvasRenderingContext2D,
   image: CanvasImageSource,
   placement: OverlayPlacement,
-  alpha: number
+  alpha: number,
+  earClip?: EarClip | null
 ) {
   if (alpha <= 0) return;
   ctx.save();
@@ -59,6 +63,21 @@ function drawOverlayImage(
   const yawSquash = Math.max(Math.cos((placement.yawDeg * Math.PI) / 180), 0.55);
   const pitchSquash = Math.max(Math.cos((placement.pitchDeg * Math.PI) / 180), 0.7);
   ctx.scale(yawSquash, pitchSquash);
+  // Mirrors the live preview's CSS clip-path (computeEarClip): clip the
+  // temple arm at roughly the ear so a captured angled photo matches what
+  // was on screen, not just the un-clipped front image.
+  if (earClip) {
+    const w = placement.widthPx;
+    const h = placement.heightPx;
+    ctx.beginPath();
+    if (earClip.side === "right") {
+      ctx.rect(-w / 2, -h / 2, w * earClip.visibleFraction, h);
+    } else {
+      const clippedFromLeft = w * earClip.visibleFraction;
+      ctx.rect(-w / 2 + clippedFromLeft, -h / 2, w - clippedFromLeft, h);
+    }
+    ctx.clip();
+  }
   ctx.shadowColor = CONTACT_SHADOW.canvas.color;
   ctx.shadowBlur = CONTACT_SHADOW.canvas.blur;
   ctx.shadowOffsetY = CONTACT_SHADOW.canvas.offsetY;
@@ -90,6 +109,7 @@ export function VirtualTryOnModal() {
   const [faceState, setFaceState] = useState<FaceState>("searching");
   const [placement, setPlacement] = useState<OverlayPlacement | null>(null);
   const [sideOverlay, setSideOverlay] = useState<SideOverlaySelection | null>(null);
+  const [earClip, setEarClip] = useState<EarClip | null>(null);
   const [captured, setCaptured] = useState<string | null>(null);
 
   useEffect(() => {
@@ -173,6 +193,7 @@ export function VirtualTryOnModal() {
             smootherRef.current.next(null, now);
             setPlacement(null);
             setSideOverlay(null);
+            setEarClip(null);
           }
           // Else: within the grace window, hold the last placement as-is.
         } else {
@@ -186,11 +207,14 @@ export function VirtualTryOnModal() {
           );
           const pose = smootherRef.current.next(rawPose, now);
           if (pose && currentProduct && size.width && size.height) {
-            setPlacement(computeOverlayPlacement(pose, currentProduct.tryOn, video, size));
+            const nextPlacement = computeOverlayPlacement(pose, currentProduct.tryOn, video, size);
+            setPlacement(nextPlacement);
             setSideOverlay(selectSideOverlay(pose, currentProduct.tryOn, video, size));
+            setEarClip(nextPlacement ? computeEarClip(pose, nextPlacement, video, size) : null);
           } else {
             setPlacement(null);
             setSideOverlay(null);
+            setEarClip(null);
           }
         }
       }
@@ -238,7 +262,7 @@ export function VirtualTryOnModal() {
             placement.heightPx,
             edgeFade(product.tryOn.edgeFade, placement.yawDeg)
           );
-          drawOverlayImage(ctx, faded ?? overlayImg, placement, 1 - blend);
+          drawOverlayImage(ctx, faded ?? overlayImg, placement, 1 - blend, earClip);
         }
         if (sideOverlay && blend > 0) {
           const sideImg = await loadImage(sideOverlay.src);
@@ -302,6 +326,7 @@ export function VirtualTryOnModal() {
                     placement={placement}
                     sideSrc={sideOverlay?.src}
                     sidePlacement={sideOverlay?.placement}
+                    earClipPath={earClipToCssPath(earClip)}
                   />
                 </div>
 

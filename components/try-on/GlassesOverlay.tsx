@@ -9,6 +9,7 @@ export function GlassesOverlay({
   placement,
   sideSrc,
   sidePlacement,
+  earClipPath,
 }: {
   product: Product;
   placement: OverlayPlacement | null;
@@ -20,6 +21,14 @@ export function GlassesOverlay({
    */
   sideSrc?: string | null;
   sidePlacement?: OverlayPlacement | null;
+  /**
+   * CSS clip-path for the front image, from `computeEarClipPath` — clips
+   * the temple arm at roughly the ear/jaw as the head turns, so it reads as
+   * going behind the head rather than floating over it. Undefined near
+   * frontal poses (no clip needed) or for products with a side image
+   * already fully covering that angle.
+   */
+  earClipPath?: string;
 }) {
   if (!placement) return null;
   const frontSrc = getProductVisualSrc(product);
@@ -54,6 +63,8 @@ export function GlassesOverlay({
             filter: CONTACT_SHADOW.css,
             maskImage: mask,
             WebkitMaskImage: mask,
+            clipPath: earClipPath,
+            WebkitClipPath: earClipPath,
             willChange: "transform, left, top, width, height, opacity",
           }}
         />

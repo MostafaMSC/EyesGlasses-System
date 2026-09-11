@@ -8,6 +8,19 @@ npm install
 npm run dev
 ```
 
+The admin panel's photo-upload pipeline (background removal + lens
+detection) needs the Python microservice running too — see
+`services/frame-processor/README.md`:
+
+```bash
+cd services/frame-processor
+python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+./venv/bin/uvicorn main:app --host 127.0.0.1 --port 8001
+```
+
+Everything else (the storefront, the live camera try-on) works without it —
+only uploading a new product photo in `/admin` needs it running.
+
 Open http://localhost:3000. To try the camera from a phone, use the
 `Network:` URL that `npm run dev` prints (camera access requires `localhost`
 or HTTPS — a plain `http://192.168.x.x` origin will be blocked by the browser,
@@ -27,10 +40,12 @@ away.
 ### Uploading a real photo
 
 You can upload an ordinary product photo — **it does not need a transparent
-background**. On upload the app automatically (all in the browser,
-`lib/processFrameImage.ts`):
+background**. On upload the app sends it to the Python microservice
+(`services/frame-processor`, reached through `app/api/frame/*`), which:
 
-1. removes the background by flood-filling inwards from the edges,
+1. removes the background with a real segmentation model (`rembg`,
+   `isnet-general-use`, with alpha matting — built specifically for fine
+   detail like thin wire bridges and rims, not just a flat cutout),
 2. makes the lens openings translucent so the wearer's eyes show through,
 3. crops away empty margins and fits the frame into one fixed 800×400 canvas
    with a consistent 5% padding, so every admin-uploaded frame occupies the
@@ -45,24 +60,25 @@ angled product shot can never sit correctly on a face.
 If automatic lens detection fails (you'll get an amber warning), press
 **تحديد العدسات بالنقر** and click the two lens centres directly on your
 original photo — the pipeline re-runs from those exact points instead of a
-guess, which fixes it in one click. The three lens sliders below are also
-still there for hand-tuning the alignment afterwards. The preview sits on a
-checkerboard so you can confirm the background really is transparent.
+guess, which fixes it in one click. There's also **قص الأذرع يدوياً**
+(manual crop) for when the auto-suggested front-rim crop itself needs
+adjusting — drag a box around just the front on the pre-crop image. The
+three lens sliders below are also still there for hand-tuning the alignment
+afterwards. The preview sits on a checkerboard so you can confirm the
+background really is transparent.
 
-Lens detection is seeded from the lens's own colour, in CIELAB space, not the
+Lens detection is seeded from the lens's own colour (CIELAB space), not the
 backdrop's — real glass is glassy-grey/blue and reflective, never the exact
-page-background colour, so it no longer needs to match it. A Sobel edge map
-stops both background removal and lens growth from crossing a strong
-structural edge (a rim), even where the rim's colour alone would be close
-enough to fool it. The background tolerance itself isn't a fixed number —
-it's derived per photo with Otsu's method from that image's own
-distance-from-background histogram. If the *backdrop* still isn't a plain,
-fairly uniform colour (a patterned surface, strong gradient, a busy scene),
-you'll get a different amber warning saying so — reshoot on a plain
-background, or click-to-seed the lenses instead of trusting the cutout.
+page-background colour. A Sobel edge map stops lens-region growth from
+crossing a strong structural edge (a rim), even where the rim's colour alone
+would be close enough to fool it — see `services/frame-processor/processing.py`
+for the full pipeline (a Python port of the original client-side logic, with
+`rembg` replacing what used to be a hand-rolled/ONNX background removal
+step).
 
-**Important:** admin-added frames are stored in that browser's `localStorage`.
-That means:
+**Important:** admin-added frames are stored in that browser's IndexedDB
+(`lib/idbProductStore.ts`) — moved off `localStorage` once products could
+carry up to three overlay images (front + left/right side). That means:
 
 - they persist across reloads on that device,
 - they are **not** visible on other devices or to other people,
@@ -72,9 +88,6 @@ That's fine for demoing and for trying frames out. To make a frame a permanent
 part of the site, use **تصدير JSON** in the admin panel and paste the entry into
 the `products` array in `data/products.ts`.
 
-Uploaded images are embedded in `localStorage`, which has a ~5MB budget in
-total — keep them under ~1.5MB each (the panel enforces this).
-
 ## Where to change things
 
 | What | File |
@@ -83,6 +96,7 @@ total — keep them under ~1.5MB each (the panel enforces this).
 | Products, prices, colours, availability, try-on tuning | `data/products.ts` |
 | Generated demo frame artwork | `lib/frameShapes.ts` |
 | Face tracking / placement math | `lib/faceGeometry.ts`, `lib/overlayPlacement.ts` |
+| Admin photo processing (background removal, lens detection) | `services/frame-processor/` (Python) |
 
 The WhatsApp number lives in exactly one place:
 
@@ -171,25 +185,27 @@ check a new asset's alignment without needing a camera.
 
 ### How the cutout is actually made
 
-`/admin`'s photo upload runs on **real neural segmentation**, not colour
-heuristics: `lib/segmentFrame.ts` runs u2netp (a small U²-Net variant,
-Apache-2.0) client-side via `onnxruntime-web`, self-hosted in
-`public/onnxruntime/` and `public/models/u2netp.onnx` the same way the live
-try-on self-hosts MediaPipe. It's what makes rimless wire frames, gradient
-tints, gold reflections and patterned/textured backgrounds work — a trained
-model has learned "this is a pair of glasses," where colour/edge matching
-only ever had "this pixel resembles that other pixel" to go on. A clear/
-optical lens comes back transparent automatically, since the model sees the
-backdrop through it, same as a person would; a tinted lens looks like solid
-material to the model, so `lib/processFrameImage.ts` still runs a
-colour-seeded search for that case — just confined to an already-accurate
-silhouette instead of having to fight background contamination too. If the
-model can't load for any reason (offline, an unsupported browser, a missing
-asset), processing automatically falls back to the previous CIELAB/Sobel/
-Otsu heuristic pipeline rather than failing outright — a real accuracy
-downgrade, not a crash. Runs single-threaded WASM (no COOP/COEP headers
-needed on the server) — a couple of seconds per upload, which is fine for a
-one-off admin action.
+`/admin`'s photo upload runs on **real neural segmentation**, server-side, in
+the Python microservice at `services/frame-processor` — reached through
+`app/api/frame/prepare`, `.../finalize` and `.../side` (see
+`lib/frameProcessorProxy.ts`), never called directly from the browser. It
+uses `rembg`'s `isnet-general-use` model with alpha matting enabled, which is
+what makes rimless wire frames, gradient tints, gold reflections and
+patterned/textured backgrounds work well — matting in particular is built
+for exactly the fine/thin-structure case (a wire bridge, a thin rim) that a
+plain binary mask erodes or half-clears. A clear/optical lens comes back
+transparent automatically, since the model sees the backdrop through it,
+same as a person would; a tinted lens looks like solid material to the
+model, so `services/frame-processor/processing.py` still runs a
+colour-seeded search for that case, confined to an already-accurate
+silhouette instead of having to fight background contamination too.
+
+This used to run entirely client-side (first a hand-rolled CIELAB/Sobel
+heuristic, later a small ONNX model loaded via `onnxruntime-web`) — moved
+server-side because neither browser approach matched a real segmentation
+model's accuracy, and the ONNX model's ~13MB WASM runtime download could
+hang the page on a slow connection. See
+`services/frame-processor/README.md` for running/deploying it.
 
 ---
 
@@ -208,7 +224,19 @@ one-off admin action.
    adapts to movement speed: heavy smoothing when still (kills jitter), light
    when moving fast (kills lag).
 4. `lib/overlayPlacement.ts` projects that pose onto the displayed video and
-   produces a CSS 3D transform; `GlassesOverlay` renders it.
+   produces a CSS 3D transform; `GlassesOverlay` renders it. It also
+   computes an **ear clip** (`computeEarClip`) once yaw passes ~8°: the
+   temple arm gets clipped at roughly the ear/jaw (a face-oval landmark
+   point) via CSS `clip-path`, easing in over a small band, so it reads as
+   tucking behind the head as the customer turns instead of floating over
+   hair/skin at a flat, un-occluded depth. The same clip is reproduced with
+   canvas `ctx.clip()` when capturing a photo, so the saved image matches
+   the live preview.
+5. If a product has left/right side-profile photos (`tryOn.leftImage` /
+   `rightImage`, uploaded in `/admin`), the overlay cross-fades from the
+   front image into the relevant side image as yaw increases — a real photo
+   with the temple arm visible, not just an implied fade. Products without
+   side photos render exactly as front-only, unchanged.
 
 ### Updating the MediaPipe assets
 
@@ -219,27 +247,13 @@ re-copy them so the WASM matches the JS:
 cp -r node_modules/@mediapipe/tasks-vision/wasm public/mediapipe/
 ```
 
-### Updating the onnxruntime-web assets
-
-Same idea, for the admin-panel segmentation model. If `onnxruntime-web` is
-upgraded, re-copy its **WASM-only** build (not the default bundle — the
-default resolves to a webgl/webgpu-capable build that expects a different
-set of WASM files and 404s against these self-hosted ones):
-
-```bash
-cp node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm public/onnxruntime/
-cp node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs public/onnxruntime/
-cp node_modules/onnxruntime-web/dist/ort.wasm.min.mjs public/onnxruntime/
-```
-
-The model itself (`public/models/u2netp.onnx`) only needs updating if you
-want to swap it for a different segmentation model.
-
 ---
 
 ## Notes
 
-- This is a **sales/demo MVP**: no backend, no payments, no accounts. Product
-  data is static and local.
+- This is a **sales/demo MVP**: no payments, no accounts. Product data is
+  static and local. The only backend is the internal Python microservice
+  used by the admin panel's photo upload (`services/frame-processor`) —
+  everything else (storefront, live try-on) is fully client-side.
 - All product data, prices and imagery are **demo values** and are meant to be
   replaced with the shop's real catalogue.
