@@ -1185,6 +1185,40 @@ function Model3dField({
   const [reading, setReading] = useState(false);
   /** An uploaded model lives in the value itself; a served one is just a path. */
   const isEmbedded = value.startsWith("data:");
+  /**
+   * Result of the last path check, tagged with the path it was for — so a
+   * stale ✓ can't linger next to a path that has since been edited.
+   */
+  const [checked, setChecked] = useState<{ path: string; ok: boolean } | null>(null);
+
+  /**
+   * Confirms the path actually resolves to a file, rather than letting a typo
+   * or a model that was never copied into `public/` sail through and only
+   * surface as a 404 later, inside the live try-on.
+   */
+  useEffect(() => {
+    if (isEmbedded || !value) return;
+    let cancelled = false;
+    // Debounced, since this runs on every keystroke of the path.
+    const timer = setTimeout(() => {
+      fetch(value, { method: "HEAD" })
+        .then((res) => !cancelled && setChecked({ path: value, ok: res.ok }))
+        .catch(() => !cancelled && setChecked({ path: value, ok: false }));
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [value, isEmbedded]);
+
+  const pathCheck =
+    isEmbedded || !value
+      ? "idle"
+      : checked?.path === value
+      ? checked.ok
+        ? "ok"
+        : "missing"
+      : "checking";
 
   const handleFile = async (file: File) => {
     if (file.size > MAX_MODEL_BYTES) {
@@ -1245,6 +1279,16 @@ function Model3dField({
         onChange={(e) => onChange(e.target.value.trim())}
         className={`${inputCls} disabled:opacity-50`}
       />
+      {pathCheck === "ok" && (
+        <p className="mt-1 text-[11px] font-bold text-accent">✓ الملف موجود على الموقع</p>
+      )}
+      {pathCheck === "missing" && (
+        <p className="mt-1 text-[11px] font-bold text-danger">
+          ✕ لا يوجد ملف على هذا المسار. تأكد أنك نسخت الملف إلى{" "}
+          <code>public/assets/frames/</code> وأعدت بناء الحاوية.
+        </p>
+      )}
+
       <p className="mt-1 mb-3 text-[11px] leading-5 text-muted">
         ضع الملف في <code>public/assets/frames/</code> واكتب مساره هنا. هذي الطريقة المفضّلة —
         بلا حد للحجم، ولا تُبطّئ باقي صفحات الموقع.
