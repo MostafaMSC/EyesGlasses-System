@@ -194,7 +194,8 @@ export default function TryOnDebugPage() {
       timestampMs: 0,
       anchorU: pose.anchorX / VIDEO_W,
       anchorV: pose.anchorY / VIDEO_H,
-      lensSpanFrac: (pose.width * product.tryOn.scale * LENS_SPAN_FRAC) / VIDEO_W,
+      projectedLensSpanFrac:
+        (pose.projectedWidth * product.tryOn.scale * LENS_SPAN_FRAC) / VIDEO_W,
       faceWidthFrac,
       offsetX: product.tryOn.offsetX,
       offsetY: product.tryOn.offsetY,
@@ -333,6 +334,7 @@ export default function TryOnDebugPage() {
       `pose.yaw    = ${pose.yaw.toFixed(1)}°   (input ${yawDeg}°)`,
       `pose.pitch  = ${pose.pitch.toFixed(1)}°`,
       `pose.width  = ${pose.width.toFixed(1)}px`,
+      `projected   = ${pose.projectedWidth.toFixed(1)}px  (ratio ${(pose.projectedWidth / pose.width).toFixed(3)})`,
       `anchor      = ${pose.anchorX.toFixed(1)}, ${pose.anchorY.toFixed(1)}`,
       `bridge lm   = ${bridge.x.toFixed(1)}, ${bridge.y.toFixed(1)}`,
       "",

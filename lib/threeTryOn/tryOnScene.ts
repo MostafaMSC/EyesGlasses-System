@@ -45,8 +45,13 @@ export interface FaceFrameInput {
   /** Lens-centre line, in normalized video coordinates (0..1, y down). */
   anchorU: number;
   anchorV: number;
-  /** Target lens-centre span, as a fraction of the video's width. */
-  lensSpanFrac: number;
+  /**
+   * Lens-centre span as it currently appears on screen, as a fraction of the
+   * video's width — foreshortening included (`FacePose.projectedWidth`). The
+   * head-on span is worked out in here by undoing the foreshortening of the
+   * very rotation being rendered, so the two can't disagree.
+   */
+  projectedLensSpanFrac: number;
   /** Temple-to-temple face width, as a fraction of the video's width. */
   faceWidthFrac: number;
   /** Per-product tuning, in frame widths / heights / degrees. */
@@ -67,6 +72,14 @@ export interface FaceFrameInput {
  * there is not much margin — this is the first constant to adjust if arms
  * either vanish too early or show through the head.
  */
+/**
+ * Floor on the foreshortening factor. A profile view shortens the lens line
+ * toward nothing, and dividing by that would blow the frame up to absurd size
+ * off the back of a rounding error; past this angle the frame is edge-on
+ * anyway, so holding the size is the better failure.
+ */
+const MIN_FORESHORTEN = 0.4;
+
 export const HEAD_MASK = {
   halfWidth: 0.46,
   halfHeight: 0.78,
@@ -226,7 +239,21 @@ export class TryOnScene {
     matrix.decompose(this.scratchPosition, this.scratchQuaternion, this.scratchScale);
     this.anchor.quaternion.copy(this.scratchQuaternion);
 
-    const lensSpanWorld = input.lensSpanFrac * viewportWidthWorld;
+    // How much this rotation shortens the lens-centre line on screen. The
+    // model's local X axis is the matrix's first column; the part of it that
+    // survives into the screen plane is its X/Y length, and dividing by the
+    // column's full length drops the uniform scale the matrix also carries.
+    //
+    // Derived from the rotation actually being rendered rather than from a
+    // separately-estimated yaw, so the foreshortening cancels exactly instead
+    // of leaving the frame to swell as the head turns. It also covers pitch
+    // and roll for free, which a yaw-only cosine would not.
+    const e = matrix.elements;
+    const axisLength = Math.hypot(e[0], e[1], e[2]);
+    const foreshorten = axisLength > 0 ? Math.hypot(e[0], e[1]) / axisLength : 1;
+
+    const projectedSpanWorld = input.projectedLensSpanFrac * viewportWidthWorld;
+    const lensSpanWorld = projectedSpanWorld / Math.max(foreshorten, MIN_FORESHORTEN);
     const scale = fitScale(this.model, lensSpanWorld);
     if (!(scale > 0) || !Number.isFinite(scale)) {
       this.anchor.visible = false;

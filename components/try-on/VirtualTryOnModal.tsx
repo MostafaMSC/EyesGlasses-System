@@ -263,9 +263,10 @@ export function VirtualTryOnModal() {
             timestampMs,
             anchorU: pose.anchorX / video.videoWidth,
             anchorV: pose.anchorY / video.videoHeight,
-            // Same expression the 2D path uses to size the overlay, so
-            // toggling 2D↔3D doesn't change how big the frame looks.
-            lensSpanFrac: (pose.width * tryOn.scale * DEFAULT_LENS_SPAN_FRAC) / video.videoWidth,
+            // `projectedWidth`, not `width`: the scene undoes the
+            // foreshortening itself, from the rotation it is about to render.
+            projectedLensSpanFrac:
+              (pose.projectedWidth * tryOn.scale * DEFAULT_LENS_SPAN_FRAC) / video.videoWidth,
             faceWidthFrac: pose.templeWidth / video.videoWidth,
             offsetX: tryOn.offsetX,
             offsetY: tryOn.offsetY,

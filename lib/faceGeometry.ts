@@ -19,6 +19,19 @@ export interface FacePose {
   width: number;
   height: number;
   /**
+   * `width` with yaw foreshortening left in — the frame's width as it actually
+   * appears on screen, rather than the head-on width it would have.
+   *
+   * The 2D overlay wants `width`: it draws a flat front view, so undoing the
+   * foreshortening is what keeps the image from shrinking as the head turns.
+   * The 3D try-on wants this one, because it re-creates the foreshortening
+   * itself by rotating real geometry with MediaPipe's pose matrix. Feeding it
+   * the compensated width would divide out the turn using the heuristic yaw
+   * below and then re-apply it using a different rotation, and the mismatch
+   * shows up as the frame swelling as the head turns.
+   */
+  projectedWidth: number;
+  /**
    * Temple-to-temple face width in video pixels, with yaw foreshortening
    * removed. Unlike `width` (which is the frame artwork's size) this is the
    * head itself, which is what the 3D try-on's invisible head mask is sized
@@ -244,6 +257,9 @@ export function computeFacePose(
 
   const width = lensSpan * VIEWBOX_WIDTH_TO_EYE_SPAN;
   const height = width * VIEWBOX_ASPECT;
+  // The same measurement with the foreshortening left in — i.e. the width as
+  // it actually appears on screen right now. See FacePose.projectedWidth.
+  const projectedWidth = width * yawCos;
 
   // --- Anchor: pupil line pulled up toward the top of the nose bridge, so the
   // frame rests on the bridge instead of sagging toward the nostrils ---
@@ -270,6 +286,7 @@ export function computeFacePose(
     anchorY,
     width,
     height,
+    projectedWidth,
     templeWidth: templeWidth / yawCos,
     roll,
     yaw,
@@ -287,6 +304,7 @@ type PoseChannel =
   | "anchorX"
   | "anchorY"
   | "width"
+  | "projectedWidth"
   | "templeWidth"
   | "roll"
   | "yaw"
@@ -345,6 +363,7 @@ export class FacePoseSmoother {
       anchorX: { minCutoff: 1.4, beta: 0.06 },
       anchorY: { minCutoff: 1.4, beta: 0.06 },
       width: { minCutoff: 0.7, beta: 0.02 },
+      projectedWidth: { minCutoff: 0.7, beta: 0.02 },
       templeWidth: { minCutoff: 0.7, beta: 0.02 },
       roll: { minCutoff: 1.0, beta: 0.04 },
       yaw: { minCutoff: 0.8, beta: 0.03 },
@@ -392,6 +411,7 @@ export class FacePoseSmoother {
       anchorY: this.smoother.smooth("anchorY", pose.anchorY, timestampMs),
       width,
       height: width * VIEWBOX_ASPECT,
+      projectedWidth: this.smoother.smooth("projectedWidth", pose.projectedWidth, timestampMs),
       templeWidth: this.smoother.smooth("templeWidth", pose.templeWidth, timestampMs),
       roll: this.smoother.smooth("roll", pose.roll, timestampMs),
       yaw: this.smoother.smooth("yaw", pose.yaw, timestampMs),
