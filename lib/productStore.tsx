@@ -30,6 +30,12 @@ interface ProductStore {
    */
   strandedLocalProducts: Product[];
   importLocalProducts: () => Promise<number>;
+  /**
+   * Saves a batch of products to the server, overwriting any with the same
+   * id. Used to carry a catalogue exported on one machine over to another —
+   * the IndexedDB import above can't, since browser storage is per-origin.
+   */
+  importProducts: (products: Product[]) => Promise<number>;
 }
 
 const ProductStoreContext = createContext<ProductStore | null>(null);
@@ -107,13 +113,12 @@ export function ProductsProvider({ children }: { children: ReactNode }) {
     setCustomProducts((prev) => prev.filter((p) => p.id !== id));
   }, []);
 
-  const importLocalProducts = useCallback(async () => {
-    const local = await idbGetAll<Product>();
-    if (local.length === 0) return 0;
+  const importProducts = useCallback(async (incoming: Product[]) => {
+    if (incoming.length === 0) return 0;
     const res = await fetch("/api/products", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(local),
+      body: JSON.stringify(incoming),
     });
     if (!res.ok) {
       const body = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -121,8 +126,13 @@ export function ProductsProvider({ children }: { children: ReactNode }) {
     }
     setCustomProducts(await fetchProducts());
     setStrandedLocalProducts([]);
-    return local.length;
+    return incoming.length;
   }, []);
+
+  const importLocalProducts = useCallback(
+    async () => importProducts(await idbGetAll<Product>()),
+    [importProducts]
+  );
 
   const value = useMemo<ProductStore>(() => {
     const all = [...customProducts, ...demoProducts];
@@ -137,6 +147,7 @@ export function ProductsProvider({ children }: { children: ReactNode }) {
       getById: (id) => all.find((p) => p.id === id),
       strandedLocalProducts,
       importLocalProducts,
+      importProducts,
     };
   }, [
     customProducts,
@@ -146,6 +157,7 @@ export function ProductsProvider({ children }: { children: ReactNode }) {
     deleteProduct,
     strandedLocalProducts,
     importLocalProducts,
+    importProducts,
   ]);
 
   return <ProductStoreContext.Provider value={value}>{children}</ProductStoreContext.Provider>;

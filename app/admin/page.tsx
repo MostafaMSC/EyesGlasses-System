@@ -133,6 +133,7 @@ export default function AdminPage() {
     hydrated,
     strandedLocalProducts,
     importLocalProducts,
+    importProducts,
   } = useProductStore();
   const { openTryOn } = useShopUI();
 
@@ -158,6 +159,30 @@ export default function AdminPage() {
   const [workingFrame, setWorkingFrame] = useState<WorkingFrame | null>(null);
   const [croppingArms, setCroppingArms] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const importRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * Restores a catalogue from a **تصدير JSON** file. This is how a catalogue
+   * built on one machine reaches another: browser storage is per-origin, so
+   * the "import from this browser" offer can't see products saved against a
+   * different host.
+   */
+  const handleImportFile = async (file: File) => {
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      const n = await importProducts(list as Product[]);
+      setMessage({ kind: "ok", text: `تم استيراد ${n} نظارة إلى السيرفر.` });
+    } catch (err) {
+      setMessage({
+        kind: "error",
+        text: err instanceof Error ? err.message : "تعذّر قراءة ملف JSON.",
+      });
+    } finally {
+      if (importRef.current) importRef.current.value = "";
+    }
+  };
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
@@ -809,11 +834,23 @@ export default function AdminPage() {
                 </p>
               </div>
 
-              {customProducts.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={exportJson} icon={<IconDownload className="h-4 w-4" />}>
-                  تصدير JSON
+              <div className="flex flex-wrap gap-2">
+                {customProducts.length > 0 && (
+                  <Button variant="ghost" size="sm" onClick={exportJson} icon={<IconDownload className="h-4 w-4" />}>
+                    تصدير JSON
+                  </Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={() => importRef.current?.click()}>
+                  استيراد JSON
                 </Button>
-              )}
+              </div>
+              <input
+                ref={importRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && handleImportFile(e.target.files[0])}
+              />
             </div>
           </aside>
         </div>
@@ -875,9 +912,10 @@ export default function AdminPage() {
           <p className="mb-1 font-bold text-ink">
             <IconGlasses className="inline h-4 w-4" /> ملاحظة
           </p>
-          النظارات المضافة تُحفظ في متصفح هذا الجهاز فقط، ولن تظهر على أجهزة أخرى. لجعلها دائمة في
-          الموقع، استخدم <strong>تصدير JSON</strong> ثم أضفها إلى <code>data/products.ts</code>، أو
-          راجع <Link href="/catalog" className="text-accent underline">الدليل في README</Link>.
+          النظارات المضافة تُحفظ على السيرفر وتظهر لكل الزوار على أي جهاز.
+          استخدم <strong>تصدير JSON</strong> لأخذ نسخة احتياطية، و<strong>استيراد JSON</strong>
+          لنقل الكاتالوج إلى سيرفر آخر. راجع{" "}
+          <Link href="/catalog" className="text-accent underline">الدليل في README</Link>.
         </div>
       </Container>
     </div>
