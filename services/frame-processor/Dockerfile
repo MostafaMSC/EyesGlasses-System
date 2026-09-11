@@ -29,8 +29,13 @@ EXPOSE 8001
 
 # Used by docker-compose.yml's `depends_on: condition: service_healthy` (the
 # web app shouldn't start routing traffic here until it actually answers) —
-# plain Python since the slim base has no curl/wget by default.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=15s \
+# plain Python since the slim base has no curl/wget by default. Generous
+# start-period/retries: onnxruntime's first inference (even with the model
+# already baked into the image) can take noticeably longer than a plain
+# "the process started" check under Docker Desktop/WSL2 virtualization
+# overhead — a container that's actually fine but slow to warm up must not
+# get marked unhealthy before it's had a real chance.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=5 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')" || exit 1
 
 # Binds to all interfaces *inside* the container — this is normal and safe.

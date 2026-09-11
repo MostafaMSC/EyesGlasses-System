@@ -26,5 +26,12 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 10s
-      timeout: 3s
-      start_period: 15s
+      timeout: 5s
+      # Generous on purpose: onnxruntime's first inference (even with the
+      # model already baked into the image) can take noticeably longer than
+      # a plain "the process started" check under Docker Desktop/WSL2
+      # virtualization overhead — a container that's actually fine but
+      # slow to warm up must not get marked unhealthy before it's had a
+      # real chance, or `web`'s depends_on gives up on it prematurely.
+      start_period: 60s
+      retries: 5
