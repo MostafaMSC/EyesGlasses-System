@@ -37,21 +37,27 @@ const HEAD_MODEL: Record<number, [number, number, number]> = {
 function buildSyntheticLandmarks(opts: {
   yawDeg: number;
   rollDeg: number;
+  /** Head tilt up/down (rotation about the horizontal axis) before yaw/roll. */
+  pitchDeg?: number;
   headHalfWidthPx: number;
   centerX: number;
   centerY: number;
 }): NormalizedPoint[] {
-  const { yawDeg, rollDeg, headHalfWidthPx, centerX, centerY } = opts;
+  const { yawDeg, rollDeg, pitchDeg = 0, headHalfWidthPx, centerX, centerY } = opts;
   const yaw = (yawDeg * Math.PI) / 180;
   const roll = (rollDeg * Math.PI) / 180;
+  const pitch = (pitchDeg * Math.PI) / 180;
 
   const landmarks: NormalizedPoint[] = [];
   for (const [indexStr, [x, y, z]] of Object.entries(HEAD_MODEL)) {
-    // Rotate about the vertical axis (yaw), then project orthographically.
-    const xr = x * Math.cos(yaw) + z * Math.sin(yaw);
+    // Rotate about the horizontal axis (pitch: chin tucked/head tilted back),
+    // then the vertical axis (yaw), then project orthographically.
+    const yp = y * Math.cos(pitch) - z * Math.sin(pitch);
+    const zp = y * Math.sin(pitch) + z * Math.cos(pitch);
+    const xr = x * Math.cos(yaw) + zp * Math.sin(yaw);
     // Scale to pixels, then apply in-plane roll.
     const px = xr * headHalfWidthPx;
-    const py = y * headHalfWidthPx;
+    const py = yp * headHalfWidthPx;
     const rx = px * Math.cos(roll) - py * Math.sin(roll);
     const ry = px * Math.sin(roll) + py * Math.cos(roll);
 
@@ -67,6 +73,7 @@ export default function TryOnDebugPage() {
   const { products } = useProductStore();
   const [yawDeg, setYawDeg] = useState(0);
   const [rollDeg, setRollDeg] = useState(0);
+  const [pitchDeg, setPitchDeg] = useState(0);
   const [headHalfWidthPx, setHeadHalfWidthPx] = useState(110);
   const [productId, setProductId] = useState(products[0]?.id ?? "");
   const [showIris, setShowIris] = useState(true);
@@ -78,6 +85,7 @@ export default function TryOnDebugPage() {
     const lm = buildSyntheticLandmarks({
       yawDeg,
       rollDeg,
+      pitchDeg,
       headHalfWidthPx,
       centerX: VIDEO_W / 2,
       centerY: VIDEO_H / 2,
@@ -108,7 +116,7 @@ export default function TryOnDebugPage() {
         )
       : null;
     return { landmarks: lm, pose: p, placement: pl };
-  }, [yawDeg, rollDeg, headHalfWidthPx, product, showIris]);
+  }, [yawDeg, rollDeg, pitchDeg, headHalfWidthPx, product, showIris]);
 
   const pt = (i: number) =>
     landmarks[i] ? { x: landmarks[i].x * VIDEO_W, y: landmarks[i].y * VIDEO_H } : null;
@@ -183,6 +191,7 @@ export default function TryOnDebugPage() {
 
           <Slider label="yaw (input)" value={yawDeg} min={-50} max={50} onChange={setYawDeg} />
           <Slider label="roll (input)" value={rollDeg} min={-40} max={40} onChange={setRollDeg} />
+          <Slider label="pitch (input, head tilt)" value={pitchDeg} min={-60} max={60} onChange={setPitchDeg} />
           <Slider label="head half-width px" value={headHalfWidthPx} min={50} max={200} onChange={setHeadHalfWidthPx} />
 
           <label className="mb-4 flex items-center gap-2">

@@ -298,8 +298,90 @@ def clear_lens_reflections(rgba: np.ndarray, lenses: list[LensRegion]) -> None:
         patch[:, :, 3] = np.where(opaque & reflective, LENS_ALPHA, patch[:, :, 3])
 
 
-def mark_lens_alpha(rgba: np.ndarray, mask: np.ndarray) -> None:
-    rgba[:, :, 3] = np.where(mask, LENS_ALPHA, rgba[:, :, 3])
+def lens_interior_fill(region_mask: np.ndarray, region: LensRegion) -> np.ndarray:
+    """Pixels a lens fill had to route around but which sit inside the lens
+    opening anyway — a temple arm seen through the glass, a printed brand
+    logo, a hard-edged reflection.
+
+    Colour can't tell those apart from real frame material (a dark arm
+    behind the glass and a dark browline bar above it are the same pixels to
+    a colour test), but geometry can: a pixel with lens on both sides of it
+    horizontally AND vertically, within that lens's own bounding box, is
+    enclosed by the opening whatever is drawn on it. Requiring both axes is
+    what keeps the fill inside the rim (a rim pixel has lens to one side
+    only); confining it to the region's own bbox stops one lens reaching
+    across the bridge into the other. An object that exits the lens rather
+    than crossing it (an arm running out through the hinge) stops qualifying
+    where it leaves, which is the correct place to stop.
+    """
+    y0, y1 = region.min_y, region.max_y + 1
+    x0, x1 = region.min_x, region.max_x + 1
+    sub = region_mask[y0:y1, x0:x1]
+    full = np.zeros_like(region_mask)
+    if sub.size == 0:
+        return full
+
+    h, w = sub.shape
+    cols = np.arange(w)
+    row_has = sub.any(axis=1)
+    first_col = np.where(sub, np.broadcast_to(cols, sub.shape), w).min(axis=1)
+    last_col = np.where(sub, np.broadcast_to(cols, sub.shape), -1).max(axis=1)
+    between_row = (cols[None, :] >= first_col[:, None]) & (cols[None, :] <= last_col[:, None]) & row_has[:, None]
+
+    rows = np.arange(h)
+    col_has = sub.any(axis=0)
+    rows_b = np.broadcast_to(rows[:, None], sub.shape)
+    first_row = np.where(sub, rows_b, h).min(axis=0)
+    last_row = np.where(sub, rows_b, -1).max(axis=0)
+    between_col = (rows[:, None] >= first_row[None, :]) & (rows[:, None] <= last_row[None, :]) & col_has[None, :]
+
+    full[y0:y1, x0:x1] = between_row & between_col & ~sub
+    return full
+
+
+def median_region_color(rgb: np.ndarray, region_mask: np.ndarray) -> np.ndarray:
+    """Median colour of a lens's own grown pixels — the glass colour an
+    occluder inside it should be repainted as."""
+    pixels = rgb[region_mask]
+    if pixels.size == 0:
+        return np.array([128, 128, 128], dtype=np.uint8)
+    return np.median(pixels, axis=0).astype(np.uint8)
+
+
+def mark_lens(rgba: np.ndarray, region: LensRegion, region_mask: np.ndarray) -> None:
+    """Marks a lens: its own grown pixels keep their photographed colour at
+    glass alpha, while anything enclosed by them (see `lens_interior_fill`)
+    is repainted to the lens's median colour first — LENS_ALPHA is
+    translucent, not invisible, so a black temple arm left at its own colour
+    still reads as a dark streak through the glass at 15% opacity; only
+    replacing the colour makes it genuinely disappear into the lens."""
+    color = median_region_color(rgba[:, :, :3], region_mask)
+    fill_mask = lens_interior_fill(region_mask, region)
+    rgba[:, :, :3] = np.where(fill_mask[:, :, None], color, rgba[:, :, :3])
+    rgba[:, :, 3] = np.where(region_mask | fill_mask, LENS_ALPHA, rgba[:, :, 3])
+
+
+def clear_occluders_inside_holes(rgba: np.ndarray, lenses: list[LensRegion]) -> None:
+    """Same enclosed-occluder clearing as `mark_lens`, for lenses that
+    arrived already transparent rather than colour-grown — a clear optical
+    lens the ML matte saw straight through, or a source PNG that already had
+    its lens openings cut out. Those paths never call `grow_lens_region`, so
+    nothing has looked at what sits inside the opening: an arm folded across
+    the glass stays fully opaque in the middle of an otherwise cut-out lens.
+    The hole's own transparent pixels stand in for the grown region here,
+    and anything they enclose is cleared outright — the surrounding lens is
+    see-through, so an occluder inside it should be too, rather than being
+    repainted to glass colour the way a tinted lens's is."""
+    alpha = rgba[:, :, 3]
+    for region in lenses:
+        y0, y1 = region.min_y, region.max_y + 1
+        x0, x1 = region.min_x, region.max_x + 1
+        full_mask = np.zeros(alpha.shape, dtype=bool)
+        full_mask[y0:y1, x0:x1] = alpha[y0:y1, x0:x1] < OPAQUE_THRESHOLD
+        if not full_mask.any():
+            continue
+        fill_mask = lens_interior_fill(full_mask, region)
+        alpha[:] = np.where(fill_mask, 0, alpha)
 
 
 def detect_and_mark_lenses(
@@ -317,8 +399,8 @@ def detect_and_mark_lenses(
     if not trust_seeds and not is_plausible_lens_pair(left_region, right_region):
         return []
 
-    mark_lens_alpha(rgba, left_mask)
-    mark_lens_alpha(rgba, right_mask)
+    mark_lens(rgba, left_region, left_mask)
+    mark_lens(rgba, right_region, right_mask)
     return [left_region, right_region]
 
 
@@ -389,6 +471,107 @@ def close_enclosed_alpha_gaps(rgba: np.ndarray, lenses: list[LensRegion]) -> Non
         if overlaps_lens:
             continue
         alpha[labels == i] = 255
+
+
+def sample_background_rgb(rgb: np.ndarray) -> np.ndarray:
+    """Median RGB from many border points — same sampling pattern as the
+    background-colour sampling used elsewhere, kept in plain RGB since
+    decontamination below works in the same space the source photo and
+    canvas compositing already use."""
+    h, w = rgb.shape[:2]
+    step = max(1, min(w, h) // 40)
+    samples = np.concatenate(
+        [rgb[0, ::step], rgb[h - 1, ::step], rgb[::step, 0], rgb[::step, w - 1]], axis=0
+    )
+    return np.median(samples.astype(np.float32), axis=0)
+
+
+def decontaminate_edge_color(rgba: np.ndarray, bg: np.ndarray) -> None:
+    """Removes background-colour bleed ("halo") left at partially-transparent
+    edge pixels after segmentation.
+
+    A photographed edge is rarely a clean step from frame to backdrop
+    (camera anti-aliasing, JPEG blending), so a pixel the matte correctly
+    marks e.g. 40% opaque still holds close to its ORIGINAL blended colour,
+    which sits far closer to the backdrop than to the frame — composited
+    over a face, that leftover tint reads as a thin light ring around the
+    frame. Unmixes each partially-transparent pixel against the assumed
+    over-compositing model (observed = alpha*fg + (1-alpha)*bg) to recover
+    the frame's own colour. Solid (alpha ~255) and fully-cleared (alpha 0)
+    pixels are left untouched — nothing to unmix at either extreme.
+    """
+    alpha = rgba[:, :, 3].astype(np.float32)
+    mask = (alpha > 0) & (alpha < 250)
+    af = np.clip(alpha / 255.0, 1e-6, 1.0)[:, :, None]
+    rgb = rgba[:, :, :3].astype(np.float32)
+    fg = (rgb - (1 - af) * bg[None, None, :]) / af
+    fg = np.clip(np.round(fg), 0, 255)
+    rgba[:, :, :3] = np.where(mask[:, :, None], fg, rgba[:, :, :3]).astype(np.uint8)
+
+
+def extend_opaque_color_into_transparency(rgba: np.ndarray, passes: int) -> None:
+    """Overwrites fully-transparent pixels' colour with nearby frame colour,
+    spreading outward a few pixels.
+
+    Alpha 0 doesn't mean a pixel's RGB is never seen: `finalize_front` crops
+    and rescales every photo into one shared canvas size, and that
+    resampling blends neighbouring pixels' colour together before alpha is
+    applied. Left as whatever the original backdrop colour was, that blend
+    can reintroduce the exact background-tinted fringe
+    `decontaminate_edge_color` just removed — this leaves nothing
+    background-coloured nearby for a later resize to blend in.
+    """
+    for _ in range(passes):
+        alpha = rgba[:, :, 3]
+        has_color = alpha > 10
+        rgb = rgba[:, :, :3].astype(np.float32)
+        rgb_masked = np.where(has_color[:, :, None], rgb, 0.0)
+        count = has_color.astype(np.float32)
+
+        sum_rgb = np.zeros_like(rgb_masked)
+        sum_count = np.zeros_like(count)
+        sum_rgb[1:, :] += rgb_masked[:-1, :]
+        sum_count[1:, :] += count[:-1, :]
+        sum_rgb[:-1, :] += rgb_masked[1:, :]
+        sum_count[:-1, :] += count[1:, :]
+        sum_rgb[:, 1:] += rgb_masked[:, :-1]
+        sum_count[:, 1:] += count[:, :-1]
+        sum_rgb[:, :-1] += rgb_masked[:, 1:]
+        sum_count[:, :-1] += count[:, 1:]
+
+        need_fill = ~has_color & (sum_count > 0)
+        avg = np.divide(sum_rgb, sum_count[:, :, None], out=np.zeros_like(sum_rgb), where=sum_count[:, :, None] > 0)
+        new_rgb = np.where(need_fill[:, :, None], np.round(avg), rgb)
+        rgba[:, :, :3] = np.clip(new_rgb, 0, 255).astype(np.uint8)
+
+
+OPAQUE_FOR_CONTRAST = 250
+
+
+def normalize_contrast(rgba: np.ndarray) -> None:
+    """Mild linear contrast stretch on the final assembled canvas — a photo
+    shot in flat/low-contrast light can otherwise render duller than the
+    catalogue photos next to it. Only touches fully-opaque pixels
+    (translucent lens interiors and the feathered/decontaminated edge ring
+    are left exactly as those earlier passes produced them), and skips a
+    photo that's already well-exposed or a degenerate near-solid-colour
+    selection either way.
+    """
+    alpha = rgba[:, :, 3]
+    opaque = alpha >= OPAQUE_FOR_CONTRAST
+    if not opaque.any():
+        return
+    rgb = rgba[:, :, :3].astype(np.float32)
+    luminance = 0.2126 * rgb[:, :, 0] + 0.7152 * rgb[:, :, 1] + 0.0722 * rgb[:, :, 2]
+    vals = luminance[opaque]
+    lo, hi = float(vals.min()), float(vals.max())
+    rng = hi - lo
+    if not (5 < rng < 180):
+        return
+    target_lo, target_hi = 10.0, 245.0
+    scale = (target_hi - target_lo) / rng
+    new_rgb = np.clip(np.round(target_lo + (rgb - lo) * scale), 0, 255)
+    rgba[:, :, :3] = np.where(opaque[:, :, None], new_rgb, rgba[:, :, :3]).astype(np.uint8)
 
 
 def feather_alpha(alpha: np.ndarray) -> None:
@@ -486,6 +669,22 @@ def column_profile_crop(alpha: np.ndarray, content: tuple[int, int, int, int]) -
     return (x0, y0, x1 - x0 + 1, y1 - y0 + 1), x_max - x_min + 1
 
 
+def enforce_lens_symmetry(lens_left_x: float, lens_right_x: float) -> tuple[float, float]:
+    """Auto-detection can land the two lenses at genuinely different
+    distances from the frame's own centre line — glare eating into one
+    lens, a hinge shadow biasing the other's seed growth — while still
+    passing both `is_plausible_lens_pair` and `is_plausible_geometry`:
+    their tolerances exist for real, mildly-imperfect photos, not to catch
+    every asymmetry. The visible result is the overlay rendering off-centre
+    or hugging one eye instead of both. Recentering the reported span
+    around the exact midpoint (0.5) removes that failure mode outright — it
+    changes only the normalized alignment metadata used to place the
+    overlay, never the crop itself, and is never applied to manual seeds: a
+    human's own two clicks are trusted as-is (see the call site)."""
+    span = lens_right_x - lens_left_x
+    return 0.5 - span / 2, 0.5 + span / 2
+
+
 def is_plausible_geometry(aspect: float, lens_left_x: float, lens_right_x: float, lens_y: float) -> bool:
     """Rejects lens measurements that cannot describe a real pair of glasses
     — the on-screen size is derived by dividing by the lens span, so a bogus
@@ -526,6 +725,7 @@ def prepare_front(image_bytes: bytes, manual_seeds: Optional[dict] = None) -> di
         lenses = find_transparent_holes(rgba[:, :, 3])
         if len(lenses) == 2:
             clear_lens_reflections(rgba, lenses)
+        clear_occluders_inside_holes(rgba, lenses)
         drop_detached_specks(rgba[:, :, 3])
         close_enclosed_alpha_gaps(rgba, lenses)
     else:
@@ -545,7 +745,13 @@ def prepare_front(image_bytes: bytes, manual_seeds: Optional[dict] = None) -> di
             # assuming anything about colour.
             lenses = find_transparent_holes(rgba[:, :, 3])
             plausible = len(lenses) == 2 and is_plausible_lens_pair(lenses[0], lenses[1])
-            if not plausible:
+            if plausible:
+                clear_occluders_inside_holes(rgba, lenses)
+            else:
+                # A tinted/sunglasses lens looks like solid material to the
+                # model (no notion of "glass"), so it comes back opaque
+                # along with the rim — falls through to the colour-seeded
+                # search, confined to an already-accurate silhouette.
                 lenses = detect_and_mark_lenses(rgba, lab, edge, auto_seeds(rgba), trust_seeds=False)
 
         if len(lenses) == 2:
@@ -553,6 +759,8 @@ def prepare_front(image_bytes: bytes, manual_seeds: Optional[dict] = None) -> di
         drop_detached_specks(rgba[:, :, 3])
         close_enclosed_alpha_gaps(rgba, lenses)
         feather_alpha(rgba[:, :, 3])
+        decontaminate_edge_color(rgba, sample_background_rgb(rgba[:, :, :3]))
+        extend_opaque_color_into_transparency(rgba, 3)
 
     content_box = bounding_box(rgba[:, :, 3])
     box = content_box
@@ -573,6 +781,10 @@ def prepare_front(image_bytes: bytes, manual_seeds: Optional[dict] = None) -> di
         candidate_right_x = (lenses[1].cx - bx) / bw
         candidate_lens_y = ((lenses[0].cy + lenses[1].cy) / 2 - by) / bh
         candidate_aspect = bw / bh
+        # A human's two clicks already say "these are the lenses" — forcing
+        # symmetry on top would override a deliberate, trusted correction.
+        if not manual_trusted:
+            candidate_left_x, candidate_right_x = enforce_lens_symmetry(candidate_left_x, candidate_right_x)
         if is_plausible_geometry(candidate_aspect, candidate_left_x, candidate_right_x, candidate_lens_y) or manual_trusted:
             box = candidate_box
             geometry = {
@@ -676,6 +888,7 @@ def finalize_front(working: dict, box: dict) -> dict:
     ry1 = min(FINAL_CANVAS_HEIGHT, offset_y + draw_h)
     rx1 = min(FINAL_CANVAS_WIDTH, offset_x + draw_w)
     canvas[offset_y:ry1, offset_x:rx1] = resized[: ry1 - offset_y, : rx1 - offset_x]
+    normalize_contrast(canvas)
 
     def to_final_x(frac_of_box: float) -> float:
         return (bx + frac_of_box * bw - px0) * fit_scale + offset_x
@@ -720,6 +933,8 @@ def process_side(image_bytes: bytes) -> dict:
         # artifact, never intentional translucency, for a side photo.
         close_enclosed_alpha_gaps(rgba, [])
         feather_alpha(rgba[:, :, 3])
+        decontaminate_edge_color(rgba, sample_background_rgb(rgba[:, :, :3]))
+        extend_opaque_color_into_transparency(rgba, 3)
 
     cx, cy, cw, ch = bounding_box(rgba[:, :, 3])
     pad_x = round(cw * SIDE_PADDING_FRACTION)
@@ -745,6 +960,7 @@ def process_side(image_bytes: bytes) -> dict:
     ry1 = min(SIDE_FINAL_HEIGHT, offset_y + draw_h)
     rx1 = min(SIDE_FINAL_WIDTH, offset_x + draw_w)
     canvas[offset_y:ry1, offset_x:rx1] = resized[: ry1 - offset_y, : rx1 - offset_x]
+    normalize_contrast(canvas)
 
     return {
         "dataUrl": encode_data_url(canvas),

@@ -25,6 +25,29 @@ Open http://localhost:3000. To try the camera from a phone, use the
 or HTTPS — a plain `http://192.168.x.x` origin will be blocked by the browser,
 so use a tunnel such as `npx localtunnel --port 3000` for phone testing).
 
+## Running with Docker
+
+No local Node or Python install needed — this runs the web app **and** the
+`services/frame-processor` microservice together, wired to each other over
+Docker's internal network automatically:
+
+```bash
+docker compose up --build
+```
+
+Open http://localhost:3000. `frame-processor` isn't published to the host in
+this setup (the web container reaches it internally) — use
+`services/frame-processor/docker-compose.yml` directly instead if you want
+just that one service running with a host-reachable port for `curl`/
+debugging (e.g. when the web app runs directly on the host, not Dockerized).
+First build takes a few minutes; `frame-processor`'s segmentation model is
+baked into its image at build time, so it needs no download at startup.
+
+Stop with `Ctrl+C`, or `docker compose down` to also remove the containers.
+
+Camera-based try-on still needs `localhost` or HTTPS in the browser (see
+above) — that's a browser rule, unaffected by Docker.
+
 ---
 
 ## Admin panel — adding frames without touching code
