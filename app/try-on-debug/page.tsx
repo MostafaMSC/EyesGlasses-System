@@ -7,13 +7,33 @@
  * computeFacePose -> computeOverlayPlacement -> GlassesOverlay pipeline so the
  * placement math can be verified without a camera, and per-product offsets can
  * be tuned. Visit /try-on-debug.
+ *
+ * It renders through exactly the same inputs the live try-on passes to the
+ * overlay — placement, the ear clip, and the side-photo cross-fade — plus the
+ * same selfie mirroring, so what you see here is what a customer gets. Two
+ * deliberate differences remain:
+ *
+ * - **No pose smoothing.** The live try-on runs the pose through
+ *   `FacePoseSmoother`, which needs a stream of frames to converge. Here each
+ *   slider position is a single frame, so the raw pose is the honest answer;
+ *   smoothing would just show a value lagging behind the slider.
+ * - **No cover-crop.** The "video" is the same size as the display, so
+ *   `computeCoverTransform` is an identity. A real camera feed is cropped to
+ *   fill the stage, which scales and offsets everything uniformly.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Euler, MathUtils, Matrix4 } from "three";
 import { useProductStore } from "@/lib/productStore";
 import { computeFacePose, PitchCalibrator, type NormalizedPoint } from "@/lib/faceGeometry";
-import { computeOverlayPlacement, DEFAULT_OVERLAY_GEOMETRY, overlayTransform } from "@/lib/overlayPlacement";
+import {
+  computeEarClip,
+  computeOverlayPlacement,
+  DEFAULT_OVERLAY_GEOMETRY,
+  earClipToCssPath,
+  overlayTransform,
+  selectSideOverlay,
+} from "@/lib/overlayPlacement";
 import { GlassesOverlay } from "@/components/try-on/GlassesOverlay";
 import { GlassesOverlay3D, type GlassesOverlay3DHandle } from "@/components/try-on/GlassesOverlay3D";
 import { MEDIAPIPE_VERTICAL_FOV_DEG } from "@/lib/threeTryOn/faceMatrix";
@@ -85,12 +105,14 @@ export default function TryOnDebugPage() {
   const [productId, setProductId] = useState(products[0]?.id ?? "");
   const [showIris, setShowIris] = useState(true);
   const [render3d, setRender3d] = useState(false);
+  /** Defaults on, so the harness matches the live try-on out of the box. */
+  const [mirrored, setMirrored] = useState(true);
   const overlay3dRef = useRef<GlassesOverlay3DHandle>(null);
 
   // Falls back if the selected product was deleted from the admin panel.
   const product = products.find((p) => p.id === productId) ?? products[0];
 
-  const { landmarks, pose, placement } = useMemo(() => {
+  const { landmarks, pose, placement, sideOverlay, earClip } = useMemo(() => {
     const lm = buildSyntheticLandmarks({
       yawDeg,
       rollDeg,
@@ -115,16 +137,20 @@ export default function TryOnDebugPage() {
     });
     computeFacePose(frontal, VIDEO_W, VIDEO_H, calibrator);
 
+    const video = { videoWidth: VIDEO_W, videoHeight: VIDEO_H };
+    const display = { width: VIDEO_W, height: VIDEO_H };
+
     const p = computeFacePose(lm, VIDEO_W, VIDEO_H, calibrator);
-    const pl = p && product
-      ? computeOverlayPlacement(
-          p,
-          product.tryOn,
-          { videoWidth: VIDEO_W, videoHeight: VIDEO_H },
-          { width: VIDEO_W, height: VIDEO_H }
-        )
-      : null;
-    return { landmarks: lm, pose: p, placement: pl };
+    const pl = p && product ? computeOverlayPlacement(p, product.tryOn, video, display) : null;
+
+    // The live try-on feeds two more things into the overlay, and leaving them
+    // out here meant the harness quietly showed different behaviour from the
+    // real thing: the temple arm wasn't clipped at the ear, and a product with
+    // side photos never crossed over to them as the head turned.
+    const side = p && product ? selectSideOverlay(p, product.tryOn, video, display) : null;
+    const clip = p && pl ? computeEarClip(p, pl, video, display) : null;
+
+    return { landmarks: lm, pose: p, placement: pl, sideOverlay: side, earClip: clip };
   }, [yawDeg, rollDeg, pitchDeg, headHalfWidthPx, product, showIris]);
 
   /**
@@ -218,6 +244,13 @@ export default function TryOnDebugPage() {
           className="relative shrink-0 overflow-hidden rounded-xl bg-[#1c1c1c]"
           style={{ width: VIDEO_W, height: VIDEO_H }}
         >
+          {/* The live try-on mirrors the whole stage for a selfie view, so left
+              and right are swapped on screen. Mirroring here too is what makes
+              a turn look the same way round as it does on a real camera. */}
+          <div
+            className="absolute inset-0"
+            style={{ transform: mirrored ? "scaleX(-1)" : undefined }}
+          >
           {/* Synthetic face drawn from the SAME landmarks fed to the pipeline */}
           <svg width={VIDEO_W} height={VIDEO_H} className="absolute inset-0">
             <ellipse
@@ -246,8 +279,15 @@ export default function TryOnDebugPage() {
               rect={{ left: 0, top: 0, width: VIDEO_W, height: VIDEO_H }}
             />
           ) : (
-            <GlassesOverlay product={product} placement={placement} />
+            <GlassesOverlay
+              product={product}
+              placement={placement}
+              sideSrc={sideOverlay?.src}
+              sidePlacement={sideOverlay?.placement}
+              earClipPath={earClipToCssPath(earClip)}
+            />
           )}
+          </div>
         </div>
 
         <div className="min-w-[320px] font-mono text-xs">
@@ -274,6 +314,11 @@ export default function TryOnDebugPage() {
           <label className="mb-2 flex items-center gap-2">
             <input type="checkbox" checked={showIris} onChange={(e) => setShowIris(e.target.checked)} />
             iris landmarks available
+          </label>
+
+          <label className="mb-2 flex items-center gap-2">
+            <input type="checkbox" checked={mirrored} onChange={(e) => setMirrored(e.target.checked)} />
+            mirrored (as the customer sees it)
           </label>
 
           <label className="mb-4 flex items-center gap-2">
