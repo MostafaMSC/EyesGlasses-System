@@ -729,6 +729,14 @@ def prepare_front(image_bytes: bytes, manual_seeds: Optional[dict] = None) -> di
         drop_detached_specks(rgba[:, :, 3])
         close_enclosed_alpha_gaps(rgba, lenses)
     else:
+        # Sample the real background colour from the ORIGINAL photo before
+        # removal touches it — rembg does not preserve RGB at pixels it
+        # clears to alpha 0 (confirmed empirically: a photographed
+        # near-white backdrop can come back as near-black there), so
+        # sampling the border from the post-removal image gives
+        # decontaminate_edge_color a badly wrong reference and drags the
+        # whole cutout toward a dark/off-colour cast.
+        original_bg = sample_background_rgb(rgba[:, :, :3])
         rgba = remove_background(rgba[:, :, :3])
         lab = to_lab(rgba[:, :, :3])
         edge = sobel_edge_magnitude(lab)
@@ -759,7 +767,7 @@ def prepare_front(image_bytes: bytes, manual_seeds: Optional[dict] = None) -> di
         drop_detached_specks(rgba[:, :, 3])
         close_enclosed_alpha_gaps(rgba, lenses)
         feather_alpha(rgba[:, :, 3])
-        decontaminate_edge_color(rgba, sample_background_rgb(rgba[:, :, :3]))
+        decontaminate_edge_color(rgba, original_bg)
         extend_opaque_color_into_transparency(rgba, 3)
 
     content_box = bounding_box(rgba[:, :, 3])
@@ -927,13 +935,17 @@ def process_side(image_bytes: bytes) -> dict:
 
     already_transparent = bool((rgba[:, :, 3] < 200).any())
     if not already_transparent:
+        # See prepare_front — sample the background colour before removal
+        # replaces it, since rembg does not preserve RGB at pixels it
+        # clears to alpha 0.
+        original_bg = sample_background_rgb(rgba[:, :, :3])
         rgba = remove_background(rgba[:, :, :3])
         drop_detached_specks(rgba[:, :, 3])
         # No lens regions to protect — any enclosed haze here is always an
         # artifact, never intentional translucency, for a side photo.
         close_enclosed_alpha_gaps(rgba, [])
         feather_alpha(rgba[:, :, 3])
-        decontaminate_edge_color(rgba, sample_background_rgb(rgba[:, :, :3]))
+        decontaminate_edge_color(rgba, original_bg)
         extend_opaque_color_into_transparency(rgba, 3)
 
     cx, cy, cw, ch = bounding_box(rgba[:, :, 3])
