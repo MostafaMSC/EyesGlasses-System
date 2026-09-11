@@ -44,3 +44,10 @@ next-env.d.ts
 services/frame-processor/venv/
 services/frame-processor/__pycache__/
 services/frame-processor/*.pyc
+
+# 3D frame models dropped in the project root while being prepared for
+# upload. Raw generator output runs tens of MB, and these are uploaded
+# through /admin rather than served from the repo — only the root is
+# ignored, so a deliberate asset under public/ can still be committed.
+/*.glb
+/*.gltf

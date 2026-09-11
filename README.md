@@ -324,6 +324,36 @@ checked across yaw without a camera.
 - Uncompressed geometry: Draco/meshopt decoders are not bundled.
 - Up to 8MB. It is stored inline with the product in IndexedDB, like the
   photos, so no separate hosting is needed.
+- **Transparent (or deleted) lenses.** A model with solid lens geometry hides
+  the customer's eyes, which defeats the point. AI generators in particular
+  produce opaque lenses baked into a single material with the frame, so they
+  can't be made see-through from code — the lens faces have to be deleted or
+  given their own transparent material in Blender.
+
+### Shrinking a generated model
+
+AI 3D generators (Rodin/Hyper3D, Tripo, and similar) export at full density —
+a pair of glasses can come out at **1,000,000 triangles and 38MB**, which is
+both over the upload limit and far too heavy to render on a phone. No
+dependency needed to fix it; `npx` fetches the tool on demand:
+
+```bash
+npx @gltf-transform/cli@4 simplify in.glb step1.glb --ratio 0.05 --error 0.002
+npx @gltf-transform/cli@4 resize step1.glb step2.glb --width 1024 --height 1024
+npx @gltf-transform/cli@4 prune step2.glb out.glb
+```
+
+That takes a 1M-triangle / 38MB export down to roughly **63k triangles and
+6MB** with no visible change to the silhouette. Check the result before
+uploading — `simplify` is lossy, and thin temple arms are the first thing it
+damages:
+
+```bash
+npx @gltf-transform/cli@4 inspect out.glb
+```
+
+Raw generator output and work-in-progress models can sit in the project root;
+`/*.glb` is gitignored so a stray `git add -A` can't commit tens of megabytes.
 
 ### Updating the MediaPipe assets
 
