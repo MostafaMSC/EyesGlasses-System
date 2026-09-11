@@ -355,30 +355,38 @@ costs:
 
 Raising the cap only makes (2) worse. Use the served route instead.
 
-### Shrinking a generated model
+### Adding a new model
 
 AI 3D generators (Rodin/Hyper3D, Tripo, and similar) export at full density —
-a pair of glasses can come out at **1,000,000 triangles and 38MB**, which is
-both over the upload limit and far too heavy to render on a phone. No
-dependency needed to fix it; `npx` fetches the tool on demand:
+a pair of glasses comes out at **500,000–1,000,000 triangles and 28–38MB**,
+far too heavy to render on a phone. One command does the whole job:
 
 ```bash
-npx @gltf-transform/cli@4 simplify in.glb step1.glb --ratio 0.05 --error 0.002
-npx @gltf-transform/cli@4 resize step1.glb step2.glb --width 1024 --height 1024
-npx @gltf-transform/cli@4 prune step2.glb out.glb
+npm run prepare-model -- path/to/raw.glb my-frame
 ```
 
-That takes a 1M-triangle / 38MB export down to roughly **63k triangles and
-6MB** with no visible change to the silhouette. Check the result before
-uploading — `simplify` is lossy, and thin temple arms are the first thing it
-damages:
+It simplifies to ~50k triangles (working out the ratio from the model's own
+count), shrinks textures to 1024px, writes
+`public/assets/frames/my-frame.glb`, sanity-checks the proportions, and prints
+the path to paste into `/admin`. Nothing to install — `npx` fetches
+gltf-transform on first use.
+
+**Run it from the checkout you deploy.** `public/` is baked into the Docker
+image, so a model prepared in a different clone will 404 at runtime however
+correct it is. Then:
 
 ```bash
-npx @gltf-transform/cli@4 inspect out.glb
+docker compose up -d --build web
 ```
 
-Raw generator output and work-in-progress models can sit in the project root;
-`/*.glb` is gitignored so a stray `git add -A` can't commit tens of megabytes.
+The admin field checks the path as you type and says whether the file is
+actually being served, so a typo or a missed rebuild shows up there rather
+than as a console 404 inside the try-on.
+
+Simplification is lossy and thin temple arms are the first thing it damages,
+so check the result in `/try-on-debug` with **render in 3D** before trusting
+it. Raw exports can sit anywhere in the project — `*.glb` is gitignored
+outside `public/`, so a stray `git add -A` can't commit tens of megabytes.
 
 ### Updating the MediaPipe assets
 
