@@ -9,9 +9,12 @@
  * its textures, drops it into `public/assets/frames/`, and prints the path to
  * paste into /admin.
  *
- * Run it from the checkout you actually deploy — `public/` is baked into the
- * Docker image, so a model prepared in a different clone of the repo will
- * 404 at runtime no matter how correct it is.
+ * Run it from the checkout you actually deploy — a model prepared in a
+ * different clone isn't on the server at all. `public/assets/frames` is
+ * bind-mounted into the container, so no image rebuild is needed, but the
+ * web container does need restarting: Next's standalone server settles which
+ * static paths exist at startup, so a file that appears underneath it stays
+ * a 404 until then.
  *
  * No dependency to install: gltf-transform is fetched by npx on first use.
  */
@@ -149,7 +152,7 @@ try {
 
   console.log(`\nSaved to: ${dest}`);
   console.log(`\nNext:`);
-  console.log(`  1. docker compose up -d --build web      (public/ is baked into the image)`);
+  console.log(`  1. docker compose restart web            (~1s, no rebuild needed)`);
   console.log(`  2. In /admin, set the model path to:`);
   console.log(`\n       /assets/frames/${name}.glb\n`);
   console.log(`  3. Open the try-on and turn your head. If the lenses hide your eyes,`);

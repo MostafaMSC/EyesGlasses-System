@@ -25,6 +25,12 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-abuthar}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+    volumes:
+      # 3D frame models change far more often than the app does, and the rest
+      # of public/ is baked into the image. Mounting just this folder means a
+      # new .glb is served the moment it lands here — no rebuild, no restart,
+      # no dropped requests. Read-only: the app only ever serves these.
+      - ./public/assets/frames:/app/public/assets/frames:ro
     depends_on:
       db:
         condition: service_healthy

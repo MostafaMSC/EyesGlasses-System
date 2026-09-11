@@ -427,8 +427,8 @@ Two routes, and the difference matters more than it looks:
 (`/assets/frames/wayfarer.glb`) in `/admin`. The product stores only that
 string, so: no size limit worth worrying about, the file is gzipped over the
 wire, the browser caches it, and it is fetched **only when someone opens the
-try-on**. Files under `public/` are baked into the Docker image, so rebuild
-`web` after adding one.
+try-on**. That folder is bind-mounted into the container, so adding a model
+needs `docker compose restart web` — a second — not an image rebuild.
 
 **Uploaded into the product (quick tests only).** The admin panel can also
 read the file and store it inline, capped by `MAX_MODEL_BYTES` (8MB) in
@@ -461,12 +461,22 @@ count), shrinks textures to 1024px, writes
 the path to paste into `/admin`. Nothing to install — `npx` fetches
 gltf-transform on first use.
 
-**Run it from the checkout you deploy.** `public/` is baked into the Docker
-image, so a model prepared in a different clone will 404 at runtime however
-correct it is. Then:
+**Run it from the checkout you deploy** — a model prepared in a different
+clone isn't on the server at all. Then make the running app notice it:
 
 ```bash
-docker compose up -d --build web
+docker compose restart web
+```
+
+About a second, and no rebuild: `public/assets/frames` is bind-mounted into
+the web container, so the file itself needs no image build. The restart is
+still required — Next's standalone server decides which static paths exist
+when it starts, so a file appearing underneath it is a 404 until then.
+
+If the model was prepared somewhere else, copy it over first:
+
+```bash
+scp my-frame.glb user@server:~/EyesGlasses-System/public/assets/frames/
 ```
 
 The admin field checks the path as you type and says whether the file is
