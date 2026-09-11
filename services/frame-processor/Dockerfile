@@ -2,6 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Python fully-buffers stdout when it isn't a TTY (true for `docker compose
+# up`'s log capture) — without this, log lines can sit in a buffer and
+# never appear until the process exits, making "did it hang or just not
+# flush yet?" impossible to tell from the logs alone.
+ENV PYTHONUNBUFFERED=1
+
 # opencv-python-headless still links against these even with no GUI/display
 # support.
 RUN apt-get update && apt-get install -y --no-install-recommends \
