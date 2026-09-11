@@ -42,15 +42,6 @@ export interface FacePose {
   roll: number;
   yaw: number;
   pitch: number;
-  /**
-   * A representative point near the ear/jaw hinge, in video pixel
-   * coordinates (not normalized 0..1), one per side. Used to clip the
-   * temple arm so it visually tucks behind the head as it turns, instead
-   * of floating over hair/skin at a flat, un-occluded depth — see
-   * overlayPlacement.ts's computeEarClipPath.
-   */
-  earBoundaryL: { x: number; y: number };
-  earBoundaryR: { x: number; y: number };
 }
 
 // MediaPipe FaceLandmarker indices.
@@ -67,14 +58,6 @@ const RIGHT_TEMPLE = 454;
 const NOSE_BRIDGE = 168;
 const FOREHEAD = 10;
 const CHIN = 152;
-// Face-oval landmarks near the ear/jaw hinge, averaged with the temple point
-// above into a single representative "ear boundary" per side — part of
-// MediaPipe's canonical face-oval contour (same contour LEFT_TEMPLE/
-// RIGHT_TEMPLE already sit on).
-const LEFT_UPPER_TEMPLE = 127;
-const RIGHT_UPPER_TEMPLE = 356;
-const LEFT_JAW_NEAR_EAR = 132;
-const RIGHT_JAW_NEAR_EAR = 361;
 
 // --- Tuning constants -------------------------------------------------------
 /**
@@ -268,19 +251,6 @@ export function computeFacePose(
   const anchorX = pupilMidX * (1 - BRIDGE_ANCHOR_BLEND_X) + bridge.x * BRIDGE_ANCHOR_BLEND_X;
   const anchorY = pupilMidY * (1 - BRIDGE_ANCHOR_BLEND_Y) + bridge.y * BRIDGE_ANCHOR_BLEND_Y;
 
-  // --- Ear boundary: average of three face-oval points per side (upper
-  // temple, temple, jaw-near-ear) into one representative point, used to
-  // clip the temple arm at roughly the ear instead of letting it float over
-  // hair/skin when the head turns.
-  const upperTempleL = px(landmarks[LEFT_UPPER_TEMPLE]);
-  const upperTempleR = px(landmarks[RIGHT_UPPER_TEMPLE]);
-  const jawL = px(landmarks[LEFT_JAW_NEAR_EAR]);
-  const jawR = px(landmarks[RIGHT_JAW_NEAR_EAR]);
-  const avg3 = (a: Vec2, b: Vec2 | null, c: Vec2 | null): Vec2 =>
-    b && c ? { x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3 } : a;
-  const earBoundaryL = avg3(templeL, upperTempleL, jawL);
-  const earBoundaryR = avg3(templeR, upperTempleR, jawR);
-
   return {
     anchorX,
     anchorY,
@@ -291,8 +261,6 @@ export function computeFacePose(
     roll,
     yaw,
     pitch,
-    earBoundaryL,
-    earBoundaryR,
   };
 }
 
@@ -308,11 +276,7 @@ type PoseChannel =
   | "templeWidth"
   | "roll"
   | "yaw"
-  | "pitch"
-  | "earBoundaryLX"
-  | "earBoundaryLY"
-  | "earBoundaryRX"
-  | "earBoundaryRY";
+  | "pitch";
 
 /**
  * How far a single frame's raw reading may plausibly move from the last
@@ -368,10 +332,6 @@ export class FacePoseSmoother {
       roll: { minCutoff: 1.0, beta: 0.04 },
       yaw: { minCutoff: 0.8, beta: 0.03 },
       pitch: { minCutoff: 0.8, beta: 0.03 },
-      earBoundaryLX: { minCutoff: 1.4, beta: 0.06 },
-      earBoundaryLY: { minCutoff: 1.4, beta: 0.06 },
-      earBoundaryRX: { minCutoff: 1.4, beta: 0.06 },
-      earBoundaryRY: { minCutoff: 1.4, beta: 0.06 },
     },
     { minCutoff: 1.2, beta: 0.05 }
   );
@@ -416,14 +376,6 @@ export class FacePoseSmoother {
       roll: this.smoother.smooth("roll", pose.roll, timestampMs),
       yaw: this.smoother.smooth("yaw", pose.yaw, timestampMs),
       pitch: this.smoother.smooth("pitch", pose.pitch, timestampMs),
-      earBoundaryL: {
-        x: this.smoother.smooth("earBoundaryLX", pose.earBoundaryL.x, timestampMs),
-        y: this.smoother.smooth("earBoundaryLY", pose.earBoundaryL.y, timestampMs),
-      },
-      earBoundaryR: {
-        x: this.smoother.smooth("earBoundaryRX", pose.earBoundaryR.x, timestampMs),
-        y: this.smoother.smooth("earBoundaryRY", pose.earBoundaryR.y, timestampMs),
-      },
     };
     this.lastOutput = smoothed;
     return smoothed;

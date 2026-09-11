@@ -248,14 +248,12 @@ hang the page on a slow connection. See
    adapts to movement speed: heavy smoothing when still (kills jitter), light
    when moving fast (kills lag).
 4. `lib/overlayPlacement.ts` projects that pose onto the displayed video and
-   produces a CSS 3D transform; `GlassesOverlay` renders it. It also
-   computes an **ear clip** (`computeEarClip`) once yaw passes ~8°: the
-   temple arm gets clipped at roughly the ear/jaw (a face-oval landmark
-   point) via CSS `clip-path`, easing in over a small band, so it reads as
-   tucking behind the head as the customer turns instead of floating over
-   hair/skin at a flat, un-occluded depth. The same clip is reproduced with
-   canvas `ctx.clip()` when capturing a photo, so the saved image matches
-   the live preview.
+   produces a CSS 3D transform; `GlassesOverlay` renders it. The flat image
+   is never cut: an earlier version clipped it at the ear to fake the temple
+   arm going behind the head, but a front-on product photo has no arm to
+   hide — the clip just removed the frame's own outer edge, which reads as
+   damage rather than depth. Real occlusion needs real geometry, which is
+   what the 3D path below is for.
 5. If a product has left/right side-profile photos (`tryOn.leftImage` /
    `rightImage`, uploaded in `/admin`), the overlay cross-fades from the
    front image into the relevant side image as yaw increases — a real photo

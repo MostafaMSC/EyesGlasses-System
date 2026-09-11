@@ -9,9 +9,9 @@
  * be tuned. Visit /try-on-debug.
  *
  * It renders through exactly the same inputs the live try-on passes to the
- * overlay — placement, the ear clip, and the side-photo cross-fade — plus the
- * same selfie mirroring, so what you see here is what a customer gets. Two
- * deliberate differences remain:
+ * overlay — placement and the side-photo cross-fade — plus the same selfie
+ * mirroring, so what you see here is what a customer gets. Two deliberate
+ * differences remain:
  *
  * - **No pose smoothing.** The live try-on runs the pose through
  *   `FacePoseSmoother`, which needs a stream of frames to converge. Here each
@@ -27,10 +27,8 @@ import { Euler, MathUtils, Matrix4 } from "three";
 import { useProductStore } from "@/lib/productStore";
 import { computeFacePose, PitchCalibrator, type NormalizedPoint } from "@/lib/faceGeometry";
 import {
-  computeEarClip,
   computeOverlayPlacement,
   DEFAULT_OVERLAY_GEOMETRY,
-  earClipToCssPath,
   overlayTransform,
   selectSideOverlay,
 } from "@/lib/overlayPlacement";
@@ -112,7 +110,7 @@ export default function TryOnDebugPage() {
   // Falls back if the selected product was deleted from the admin panel.
   const product = products.find((p) => p.id === productId) ?? products[0];
 
-  const { landmarks, pose, placement, sideOverlay, earClip } = useMemo(() => {
+  const { landmarks, pose, placement, sideOverlay } = useMemo(() => {
     const lm = buildSyntheticLandmarks({
       yawDeg,
       rollDeg,
@@ -143,14 +141,12 @@ export default function TryOnDebugPage() {
     const p = computeFacePose(lm, VIDEO_W, VIDEO_H, calibrator);
     const pl = p && product ? computeOverlayPlacement(p, product.tryOn, video, display) : null;
 
-    // The live try-on feeds two more things into the overlay, and leaving them
-    // out here meant the harness quietly showed different behaviour from the
-    // real thing: the temple arm wasn't clipped at the ear, and a product with
-    // side photos never crossed over to them as the head turned.
+    // The live try-on also crosses over to a product's side photos as the head
+    // turns; leaving that out here meant the harness quietly showed different
+    // behaviour from the real thing.
     const side = p && product ? selectSideOverlay(p, product.tryOn, video, display) : null;
-    const clip = p && pl ? computeEarClip(p, pl, video, display) : null;
 
-    return { landmarks: lm, pose: p, placement: pl, sideOverlay: side, earClip: clip };
+    return { landmarks: lm, pose: p, placement: pl, sideOverlay: side };
   }, [yawDeg, rollDeg, pitchDeg, headHalfWidthPx, product, showIris]);
 
   /**
@@ -285,7 +281,6 @@ export default function TryOnDebugPage() {
               placement={placement}
               sideSrc={sideOverlay?.src}
               sidePlacement={sideOverlay?.placement}
-              earClipPath={earClipToCssPath(earClip)}
             />
           )}
           </div>
