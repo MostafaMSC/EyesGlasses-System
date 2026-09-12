@@ -76,6 +76,14 @@ export interface TryOnConfig {
    */
   model3d?: string;
   /**
+   * Strip the lens surfaces out of `model3d` when it is shown, leaving the
+   * rims open so the wearer's eyes show through. Generated models come with
+   * solid, opaque lenses baked into the frame's own mesh, which hides the
+   * customer's eyes — the opposite of what a try-on is for. Off for
+   * sunglasses, where the tint is the point.
+   */
+  hideLenses?: boolean;
+  /**
    * Side-profile photos (temple arm visible, unlike the arm-less front
    * overlay). When present, the live try-on cross-fades into these as the
    * head turns past a yaw threshold instead of showing the front cutout

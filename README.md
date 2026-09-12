@@ -412,11 +412,17 @@ checked across yaw without a camera.
   Arms modelled too narrow sit inside the head mask and stay hidden even
   head-on.
 - Uncompressed geometry: Draco/meshopt decoders are not bundled.
-- **Transparent (or deleted) lenses.** A model with solid lens geometry hides
-  the customer's eyes, which defeats the point. AI generators in particular
-  produce opaque lenses baked into a single material with the frame, so they
-  can't be made see-through from code — the lens faces have to be deleted or
-  given their own transparent material in Blender.
+- **Lenses: hidden by default.** AI generators produce solid, opaque lenses
+  baked into the same mesh and material as the frame, which hides the
+  customer's eyes — the opposite of what a try-on is for. The admin panel's
+  **إخفاء العدسات** toggle (on by default for a new model) strips the lens
+  surfaces at load time, leaving the rims open; turn it off for sunglasses.
+  Detection is geometric (`lib/threeTryOn/lensGeometry.ts`): a face is lens if
+  it sits inside one of the two lens openings, faces the viewer or away, and
+  lies at lens depth rather than out on the rim's front. The region is set
+  just inside a typical lens so the rim can never be taken. It has been
+  checked on a browline acetate and a thin half-rim metal frame; a very
+  unusual shape may leave a sliver or need the model edited in Blender.
 
 ### Where the model file lives
 

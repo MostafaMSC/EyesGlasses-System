@@ -155,8 +155,8 @@ try {
   console.log(`  1. docker compose restart web            (~1s, no rebuild needed)`);
   console.log(`  2. In /admin, set the model path to:`);
   console.log(`\n       /assets/frames/${name}.glb\n`);
-  console.log(`  3. Open the try-on and turn your head. If the lenses hide your eyes,`);
-  console.log(`     delete the lens faces in Blender — that can't be fixed from code.`);
+  console.log(`  3. Open the try-on and turn your head. Lenses are hidden by default so`);
+  console.log(`     your eyes show; untick إخفاء العدسات in /admin for sunglasses.`);
   console.log(`${"─".repeat(60)}\n`);
 } finally {
   rmSync(work, { recursive: true, force: true });

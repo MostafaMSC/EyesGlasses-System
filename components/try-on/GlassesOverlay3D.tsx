@@ -52,6 +52,7 @@ export const GlassesOverlay3D = forwardRef<
   }, []);
 
   const modelSource = product.tryOn.model3d;
+  const hideLenses = Boolean(product.tryOn.hideLenses);
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -73,7 +74,7 @@ export const GlassesOverlay3D = forwardRef<
 
     setModelError(false);
     if (modelSource) {
-      loadGlassesModel(modelSource)
+      loadGlassesModel(modelSource, { hideLenses })
         .then((model) => install(model, false))
         .catch((err) => {
           console.error("[try-on] Could not load the 3D frame model", err);
@@ -90,7 +91,7 @@ export const GlassesOverlay3D = forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [modelSource, product.tryOn]);
+  }, [modelSource, hideLenses, product.tryOn]);
 
   useEffect(() => {
     if (!rect) return;

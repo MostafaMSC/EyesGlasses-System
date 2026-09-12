@@ -11,6 +11,7 @@ import {
   WebGLRenderer,
 } from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { stripLenses } from "@/lib/threeTryOn/lensGeometry";
 
 /**
  * Renders a flat, front-on picture of a 3D frame, for use as the product's
@@ -27,7 +28,16 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
  * to put them on the eyes.
  */
 
-const WIDTH = 1000;
+/**
+ * The first render is deliberately oversized — twice the model's bounding
+ * box each way — because the box has proven unreliable on generated models
+ * (it can be inflated by geometry that draws nothing, leaving the real frame
+ * off-centre and running off an edge). Rendering wide and cropping to the
+ * pixels that actually appeared is immune to that. The width keeps the crop
+ * at a useful resolution.
+ */
+const RENDER_WIDTH = 2400;
+const OVERSCAN = 2;
 /** Same assumption the loader makes: lens centres at 45% of the total width. */
 const LENS_SPAN_FRACTION = 0.45;
 /** Half-width of the pixel band sampled to locate the lens line. */
@@ -124,9 +134,14 @@ export interface ModelThumbnail {
  * whole frame and reporting the real fractions keeps the image complete and
  * still lands correctly on the eyes in the 2D try-on.
  */
-export async function renderModelThumbnail(url: string): Promise<ModelThumbnail> {
+export async function renderModelThumbnail(
+  url: string,
+  options: { hideLenses?: boolean } = {}
+): Promise<ModelThumbnail> {
   const gltf = await new GLTFLoader().loadAsync(url);
   const model = gltf.scene;
+  // The card should show what the customer will actually wear.
+  if (options.hideLenses) stripLenses(model);
 
   const canvas = document.createElement("canvas");
 
@@ -158,17 +173,13 @@ export async function renderModelThumbnail(url: string): Promise<ModelThumbnail>
     fill.position.set(-0.5, -0.3, 0.8);
     scene.add(fill);
 
-    // Render generously first, over the model's full bounding box. The box is
-    // an upper bound, not a tight one — it can include nodes that draw
-    // nothing — so the framing is then corrected from the pixels that
-    // actually came out rather than trusted from the geometry.
     const centreX = (box.min.x + box.max.x) / 2;
     const centreY = (box.min.y + box.max.y) / 2;
-    const viewWidth = size.x * 1.1;
-    const viewHeight = Math.max(size.y, size.x * 0.1) * 1.1;
+    const viewWidth = size.x * OVERSCAN;
+    const viewHeight = Math.max(size.y, size.x * 0.1) * OVERSCAN;
 
-    canvas.width = WIDTH;
-    canvas.height = Math.max(2, Math.round(WIDTH * (viewHeight / viewWidth)));
+    canvas.width = RENDER_WIDTH;
+    canvas.height = Math.max(2, Math.round(RENDER_WIDTH * (viewHeight / viewWidth)));
     renderer.setSize(canvas.width, canvas.height, false);
 
     const camera = new OrthographicCamera(

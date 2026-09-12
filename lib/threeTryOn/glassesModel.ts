@@ -1,6 +1,7 @@
 import { Box3, Group, Mesh, Object3D, Vector3 } from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { buildProceduralFrame } from "@/lib/threeTryOn/proceduralFrame";
+import { stripLenses } from "@/lib/threeTryOn/lensGeometry";
 import type { TryOnConfig } from "@/data/products";
 
 /**
@@ -124,7 +125,12 @@ export function buildFallbackModel(tryOn: TryOnConfig): GlassesModel {
 
 const modelCache = new Map<string, Promise<GlassesModel>>();
 
-async function loadFromUrl(url: string): Promise<GlassesModel> {
+export interface LoadOptions {
+  /** See `TryOnConfig.hideLenses`. */
+  hideLenses?: boolean;
+}
+
+async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesModel> {
   const gltf = await new GLTFLoader().loadAsync(url);
   const scene = gltf.scene;
 
@@ -133,6 +139,10 @@ async function loadFromUrl(url: string): Promise<GlassesModel> {
     disposeTree(scene);
     throw new Error("The 3D model has no measurable geometry.");
   }
+
+  // Before anchoring: the lens surfaces are found relative to the model's
+  // own bounding box, which anchoring shifts.
+  if (options.hideLenses) stripLenses(scene);
 
   // Convention for an uploaded GLB: modelled facing +Z with the temple arms
   // running back along -Z, so its front face (max Z) is the lens plane.
@@ -160,13 +170,15 @@ async function loadFromUrl(url: string): Promise<GlassesModel> {
  * Cached models are shared, so callers must not mutate the returned root's
  * transform; put it inside a group of your own (see `TryOnScene.setModel`).
  */
-export function loadGlassesModel(url: string): Promise<GlassesModel> {
-  const cached = modelCache.get(url);
+export function loadGlassesModel(url: string, options: LoadOptions = {}): Promise<GlassesModel> {
+  // Stripping lenses edits the geometry, so each variant is its own entry.
+  const key = `${url}#lenses=${options.hideLenses ? "hidden" : "shown"}`;
+  const cached = modelCache.get(key);
   if (cached) return cached;
 
-  const pending = loadFromUrl(url);
-  modelCache.set(url, pending);
-  pending.catch(() => modelCache.delete(url));
+  const pending = loadFromUrl(url, options);
+  modelCache.set(key, pending);
+  pending.catch(() => modelCache.delete(key));
   return pending;
 }
 
