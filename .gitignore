@@ -55,3 +55,6 @@ services/frame-processor/*.pyc
 *.gltf
 !public/**/*.glb
 !public/**/*.gltf
+
+# Database dumps taken next to the checkout (see README, "Backups").
+*.sql.gz

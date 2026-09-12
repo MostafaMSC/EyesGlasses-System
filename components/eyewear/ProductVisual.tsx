@@ -36,12 +36,22 @@ export function ProductVisual({
       <div className="pointer-events-none absolute inset-x-[14%] bottom-[10%] h-[12%] rounded-full bg-black/35 blur-xl" />
 
       <div className="relative flex h-full w-full items-center justify-center p-[12%]">
+        {/*
+          `object-contain` with a height cap, not a bare width: pictures come
+          in whatever shape their source is — a render made from a 3D model is
+          as tall as the frame it found — and a picture taller than this box
+          would otherwise overflow it and have its top and bottom sliced off
+          by the rounded corners.
+        */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={src}
           alt=""
           loading={priority ? "eager" : "lazy"}
-          className={cn("w-full drop-shadow-[0_18px_26px_rgba(0,0,0,0.45)]", imgClassName)}
+          className={cn(
+            "max-h-full w-full object-contain drop-shadow-[0_18px_26px_rgba(0,0,0,0.45)]",
+            imgClassName
+          )}
         />
       </div>
     </div>
