@@ -136,7 +136,7 @@ export function Hero() {
                 <img
                   src={getProductVisualSrc(heroProduct)}
                   alt=""
-                  className="h-full w-full drop-shadow-[0_24px_30px_rgba(0,0,0,0.5)]"
+                  className="h-full w-full object-contain drop-shadow-[0_24px_30px_rgba(0,0,0,0.5)]"
                 />
               </div>
             )}
@@ -150,7 +150,7 @@ export function Hero() {
                 <img
                   src={getProductVisualSrc(secondaryProduct)}
                   alt=""
-                  className="h-full w-full drop-shadow-[0_18px_24px_rgba(0,0,0,0.45)]"
+                  className="h-full w-full object-contain drop-shadow-[0_18px_24px_rgba(0,0,0,0.45)]"
                 />
               </div>
             )}

@@ -837,7 +837,11 @@ export default function AdminPage() {
                   }}
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={previewSrc} alt="معاينة" className="w-full drop-shadow-[0_14px_22px_rgba(0,0,0,0.45)]" />
+                  <img
+                    src={previewSrc}
+                    alt="معاينة"
+                    className="max-h-full w-full object-contain drop-shadow-[0_14px_22px_rgba(0,0,0,0.45)]"
+                  />
                 </div>
                 <p className="mt-3 text-center text-sm font-bold text-ink">
                   {form.brand || "الماركة"} — {form.name || "الموديل"}
@@ -887,7 +891,7 @@ export default function AdminPage() {
                 <div key={p.id} className="card card-lift flex flex-col gap-3 rounded-3xl p-4">
                   <div className="flex aspect-[5/4] items-center justify-center rounded-2xl border border-line bg-surface-2 p-3">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={getProductVisualSrc(p)} alt={p.name} className="w-full" />
+                    <img src={getProductVisualSrc(p)} alt={p.name} className="max-h-full w-full object-contain" />
                   </div>
                   <div>
                     <p className="text-[11px] font-bold text-accent">{p.brand}</p>

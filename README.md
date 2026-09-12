@@ -488,6 +488,31 @@ so check the result in `/try-on-debug` with **render in 3D** before trusting
 it. Raw exports can sit anywhere in the project — `*.glb` is gitignored
 outside `public/`, so a stray `git add -A` can't commit tens of megabytes.
 
+### The picture on the product card
+
+A product whose only asset is a `.glb` has nothing 2D to show, so `/admin`
+renders one: the first time a model path resolves it draws the frame front-on
+into a transparent PNG and stores it as the product's image, which is what the
+catalogue cards, the details modal and the 2D try-on then display. It never
+overwrites an uploaded photo — a real product shot beats a render — and there
+is a button to regenerate it deliberately.
+
+Everything about that render is measured from the pixels that came out, not
+from the model's geometry, because the geometry lies: these models routinely
+carry nodes that inflate the bounding box while drawing nothing. So the
+renderer takes a few small throwaway views first, works out from them how the
+model is actually oriented and how big it actually draws, and only then draws
+the picture — framed on the frame itself, with even margins, at full
+resolution.
+
+That makes the picture orientation-proof: a model lying on its back or facing
+sideways still gets photographed head-on and the right way up
+(`lib/threeTryOn/renderModelThumbnail.ts`). **The try-on is not** — it still
+expects the documented convention, facing +Z with the arms running back along
+-Z — so a good picture is not on its own proof that the model is correctly
+oriented. `npm run prepare-model` reports the proportions, and
+`/try-on-debug` is where to confirm it.
+
 ### Updating the MediaPipe assets
 
 They were copied from `node_modules` at setup time. If the package is upgraded,
