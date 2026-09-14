@@ -1,5 +1,5 @@
 import { Box3, Group, Mesh, Object3D, Vector3 } from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { gltfLoader } from "@/lib/threeTryOn/gltfLoader";
 import { buildProceduralFrame } from "@/lib/threeTryOn/proceduralFrame";
 import { stripLenses } from "@/lib/threeTryOn/lensGeometry";
 import type { TryOnConfig } from "@/data/products";
@@ -131,7 +131,7 @@ export interface LoadOptions {
 }
 
 async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesModel> {
-  const gltf = await new GLTFLoader().loadAsync(url);
+  const gltf = await gltfLoader().loadAsync(url);
   const scene = gltf.scene;
 
   const { box, size } = measure(scene);
@@ -171,15 +171,101 @@ async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesMo
  * transform; put it inside a group of your own (see `TryOnScene.setModel`).
  */
 export function loadGlassesModel(url: string, options: LoadOptions = {}): Promise<GlassesModel> {
-  // Stripping lenses edits the geometry, so each variant is its own entry.
-  const key = `${url}#lenses=${options.hideLenses ? "hidden" : "shown"}`;
+  const key = cacheKey(url, options);
   const cached = modelCache.get(key);
   if (cached) return cached;
 
   const pending = loadFromUrl(url, options);
   modelCache.set(key, pending);
-  pending.catch(() => modelCache.delete(key));
+  pending.then(
+    () => settled.add(key),
+    () => {
+      modelCache.delete(key);
+      failed.add(key);
+    }
+  );
   return pending;
+}
+
+/** Stripping lenses edits the geometry, so each variant is its own entry. */
+function cacheKey(url: string, options: LoadOptions): string {
+  return `${url}#lenses=${options.hideLenses ? "hidden" : "shown"}`;
+}
+
+/** Keys whose load has finished — the models that can be shown with no wait. */
+const settled = new Set<string>();
+/**
+ * Keys whose load failed. A real load still retries (the file may have been
+ * added since), but a preload doesn't: re-requesting a missing model every
+ * time the selection moves would be pure noise.
+ */
+const failed = new Set<string>();
+
+/** True once a model is in memory and can be shown without any wait. */
+export function isGlassesModelReady(url: string, options: LoadOptions = {}): boolean {
+  return settled.has(cacheKey(url, options));
+}
+
+/**
+ * Warms the cache for a model the user is likely to pick next, so the switch
+ * is instant when they do. Same cache as `loadGlassesModel`, so nothing is
+ * ever downloaded or parsed twice; a failure is swallowed here and simply
+ * surfaces later, from the real load, if the user does pick that frame.
+ */
+export function preloadGlassesModel(url: string, options: LoadOptions = {}): Promise<void> {
+  if (failed.has(cacheKey(url, options))) return Promise.resolve();
+  return loadGlassesModel(url, options).then(
+    () => {},
+    () => {}
+  );
+}
+
+/**
+ * Preloads the frames around the selected one — nearest first, one at a
+ * time — so the two the user is most likely to tap next are ready without
+ * the whole catalogue being pulled down.
+ *
+ *   selected  →  +1, −1  →  +2, −2
+ *
+ * Sequential rather than parallel, so a preload never competes with the
+ * selected frame's own download for bandwidth: it only starts once that one
+ * has finished. Honours the browser's data-saver setting by doing nothing.
+ * Returns a cancel function; call it when the selection changes so the queue
+ * re-centres on the new frame instead of finishing the old order.
+ */
+export function preloadGlassesModelsAround(
+  models: ReadonlyArray<{ url: string; options?: LoadOptions } | null>,
+  index: number,
+  radius = 2
+): () => void {
+  let cancelled = false;
+  const saveData = (navigator as { connection?: { saveData?: boolean } }).connection?.saveData;
+  if (saveData || index < 0 || models.length < 2) return () => {};
+
+  // Carousel positions, nearest first. A position with no 3D model (drawn
+  // procedurally) needs nothing and is skipped.
+  const order: number[] = [];
+  for (let d = 1; d <= radius; d++) {
+    if (index + d < models.length && models[index + d]) order.push(index + d);
+    if (index - d >= 0 && models[index - d]) order.push(index - d);
+  }
+
+  const run = async () => {
+    // The selected frame first: it is already loading (or loaded), this
+    // just waits for it so the neighbours queue behind it.
+    const current = models[index];
+    if (current) await loadGlassesModel(current.url, current.options).catch(() => {});
+    for (const i of order) {
+      if (cancelled) return;
+      const next = models[i]!;
+      await preloadGlassesModel(next.url, next.options);
+    }
+  };
+  void run();
+
+  return () => {
+    cancelled = true;
+  };
 }
 
 /**

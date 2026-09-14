@@ -10,7 +10,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from "three";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { gltfLoader } from "@/lib/threeTryOn/gltfLoader";
 import { stripLenses } from "@/lib/threeTryOn/lensGeometry";
 
 /**
@@ -44,6 +44,25 @@ const LENS_SPAN_FRACTION = 0.45;
 const LENS_BAND_FRACTION = 0.03;
 /** Breathing room around the frame, as a fraction of its size. */
 const PADDING = 0.06;
+/**
+ * Width the saved picture is scaled down to. The catalogue never shows a
+ * frame wider than ~500 CSS pixels, so 1200 covers a 2x screen with room to
+ * spare, and it is what a stored picture costs: this picture is embedded in
+ * the product and downloaded by every card that shows it.
+ */
+const OUTPUT_MAX_WIDTH = 1200;
+/** WebP quality. Alpha stays lossless; 0.9 leaves no visible banding on frames. */
+const WEBP_QUALITY = 0.9;
+
+/**
+ * Encodes the picture as WebP where the browser can — roughly a fifth the
+ * size of the same PNG at this quality — and as PNG where it can't (older
+ * Safari), which the browser signals by handing back a PNG anyway.
+ */
+function encode(canvas: HTMLCanvasElement): string {
+  const webp = canvas.toDataURL("image/webp", WEBP_QUALITY);
+  return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/png");
+}
 
 /**
  * Vertical centre of the drawn frame at one lens, in pixels.
@@ -125,8 +144,8 @@ export interface ModelThumbnail {
 }
 
 /**
- * Renders the frame front-on as a transparent PNG, and reports where the lens
- * centres landed in it.
+ * Renders the frame front-on as a transparent picture (WebP, or PNG where the
+ * browser can't encode WebP), and reports where the lens centres landed in it.
  *
  * The geometry is measured rather than assumed: forcing the render to match
  * `DEFAULT_OVERLAY_GEOMETRY` would mean cropping the frame to put its lenses
@@ -138,7 +157,7 @@ export async function renderModelThumbnail(
   url: string,
   options: { hideLenses?: boolean } = {}
 ): Promise<ModelThumbnail> {
-  const gltf = await new GLTFLoader().loadAsync(url);
+  const gltf = await gltfLoader().loadAsync(url);
   const model = gltf.scene;
   // The card should show what the customer will actually wear.
   if (options.hideLenses) stripLenses(model);
@@ -210,12 +229,14 @@ export async function renderModelThumbnail(
     const cropW = bounds.width + pad * 2;
     const cropH = bounds.height + pad * 2;
 
+    // Rendered big for the measurements above; saved at catalogue size.
+    const scale = Math.min(1, OUTPUT_MAX_WIDTH / cropW);
     const out = document.createElement("canvas");
-    out.width = cropW;
-    out.height = cropH;
+    out.width = Math.max(1, Math.round(cropW * scale));
+    out.height = Math.max(1, Math.round(cropH * scale));
     const ctx = out.getContext("2d");
     if (!ctx) throw new Error("Could not crop the render.");
-    ctx.drawImage(canvas, -cropX, -cropY);
+    ctx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, out.width, out.height);
 
     // Lens centres: horizontally from the model's own width, vertically from
     // the pixels themselves. Geometry can't be trusted for the vertical —
@@ -229,7 +250,7 @@ export async function renderModelThumbnail(
     const toCropX = (worldX: number) => toRenderX(worldX) - cropX;
 
     return {
-      dataUrl: out.toDataURL("image/png"),
+      dataUrl: encode(out),
       geometry: {
         aspect: cropW / cropH,
         lensLeftX: toCropX(centreX - lensOffsetX) / cropW,

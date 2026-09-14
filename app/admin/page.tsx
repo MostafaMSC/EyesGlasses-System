@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import Link from "next/link";
 import { frameSvgDataUri, type FrameShape } from "@/lib/frameShapes";
 import { getProductVisualSrc, type Availability, type Category, type Product } from "@/data/products";
-import { newProductId, slugify, useProductStore } from "@/lib/productStore";
+import { fetchProductsFull, newProductId, slugify, useProductStore } from "@/lib/productStore";
+import { stripModelVersion } from "@/lib/modelPath";
 import {
   prepareWorkingFrame,
   finalizeFrame,
@@ -419,14 +420,25 @@ export default function AdminPage() {
       rightAnchorX: t.rightImageGeometry?.anchorX ?? EMPTY.rightAnchorX,
       rightAnchorY: t.rightImageGeometry?.anchorY ?? EMPTY.rightAnchorY,
       rightAspect: t.rightImageGeometry?.aspect ?? EMPTY.rightAspect,
-      model3d: t.model3d ?? "",
+      // Without the cache-buster the listing adds: that is a delivery
+      // detail, and the path is what gets edited and stored.
+      model3d: stripModelVersion(t.model3d ?? ""),
       hideLenses: t.hideLenses ?? EMPTY.hideLenses,
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const exportJson = () => {
-    const blob = new Blob([JSON.stringify(customProducts, null, 2)], { type: "application/json" });
+  const exportJson = async () => {
+    // The stored form, pictures included — what the panel holds in memory
+    // links to pictures by URL, which would mean nothing on another server.
+    let full: Product[];
+    try {
+      full = await fetchProductsFull();
+    } catch {
+      setMessage({ kind: "error", text: "تعذّر تجهيز ملف التصدير." });
+      return;
+    }
+    const blob = new Blob([JSON.stringify(full, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

@@ -104,7 +104,7 @@ function drawOverlayImage(
 
 export function VirtualTryOnModal() {
   const { tryOnProductId, closeTryOn, setTryOnProductId } = useShopUI();
-  const { getById } = useProductStore();
+  const { getById, products } = useProductStore();
   const isOpen = Boolean(tryOnProductId);
   const product = tryOnProductId ? getById(tryOnProductId) : undefined;
 
@@ -197,6 +197,30 @@ export function VirtualTryOnModal() {
         setPermission(err.name === "NotAllowedError" || err.name === "PermissionDeniedError" ? "denied" : "unavailable");
       });
   }, []);
+
+  // Warm the frames beside the selected one while the camera is starting,
+  // so tapping a neighbour in the shelf is instant. Re-centred on every
+  // change of selection; only while 3D is showing, since 2D needs no model.
+  useEffect(() => {
+    if (!isOpen || !is3d || !product) return;
+    const models = products.map((p) =>
+      p.tryOn.model3d ? { url: p.tryOn.model3d, options: { hideLenses: Boolean(p.tryOn.hideLenses) } } : null
+    );
+    const index = products.findIndex((p) => p.id === product.id);
+    let cancelled = false;
+    let cancel: (() => void) | null = null;
+    // Imported on demand, like the overlay itself, so Three.js stays out of
+    // this bundle for anyone who only uses 2D. The overlay's own import has
+    // already started by now, so this resolves from the same chunk.
+    import("@/lib/threeTryOn/glassesModel").then((m) => {
+      if (cancelled) return;
+      cancel = m.preloadGlassesModelsAround(models, index);
+    });
+    return () => {
+      cancelled = true;
+      cancel?.();
+    };
+  }, [isOpen, is3d, product, products]);
 
   // Camera lifecycle — request permission when the modal opens, always
   // release the stream when it closes.

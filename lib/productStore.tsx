@@ -40,9 +40,27 @@ interface ProductStore {
 
 const ProductStoreContext = createContext<ProductStore | null>(null);
 
+/**
+ * The catalogue as the server lists it: pictures come as small URLs, not
+ * inline data, so this is a few KB. Left to the browser's normal caching —
+ * the server tags it with an ETag, so a repeat visit costs a 304, not the
+ * body again, while an edit in the admin panel still shows up on the very
+ * next load.
+ */
 async function fetchProducts(): Promise<Product[]> {
-  const res = await fetch("/api/products", { cache: "no-store" });
+  const res = await fetch("/api/products");
   if (!res.ok) throw new Error(`GET /api/products -> ${res.status}`);
+  const body = (await res.json()) as { products?: Product[] };
+  return body.products ?? [];
+}
+
+/**
+ * The rows as stored, pictures inlined — the portable form for a JSON
+ * backup, which has to work on another server. Admin session required.
+ */
+export async function fetchProductsFull(): Promise<Product[]> {
+  const res = await fetch("/api/products?full=1", { cache: "no-store" });
+  if (!res.ok) throw new Error(`GET /api/products?full=1 -> ${res.status}`);
   const body = (await res.json()) as { products?: Product[] };
   return body.products ?? [];
 }
@@ -94,14 +112,16 @@ export function ProductsProvider({ children }: { children: ReactNode }) {
   const addProduct = useCallback(async (product: Product) => {
     // Saved first, then shown: unlike the old browser-local store this can
     // genuinely fail, and a card that appears and then vanishes on reload is
-    // worse than an error.
+    // worse than an error. Re-fetched rather than appended, so the new card
+    // gets its picture as a URL like every other rather than the megabyte of
+    // data the form was holding.
     await saveProduct(product);
-    setCustomProducts((prev) => [...prev, product]);
+    setCustomProducts(await fetchProducts());
   }, []);
 
   const updateProduct = useCallback(async (id: string, product: Product) => {
     await saveProduct(product);
-    setCustomProducts((prev) => prev.map((p) => (p.id === id ? product : p)));
+    setCustomProducts(await fetchProducts());
   }, []);
 
   const deleteProduct = useCallback(async (id: string) => {

@@ -210,6 +210,8 @@ pasting entries into `data/products.ts` to ship them as static defaults.
 | Face tracking / placement math | `lib/faceGeometry.ts`, `lib/overlayPlacement.ts` |
 | 3D try-on (Three.js scene, head mask, model fitting) | `lib/threeTryOn/` |
 | Catalogue storage / API | `lib/db.ts`, `app/api/products/` |
+| Product pictures served separately from the listing, and cached | `lib/productAssets.ts`, `app/api/products/[id]/asset/` |
+| 3D model preloading and in-memory cache | `lib/threeTryOn/glassesModel.ts` |
 | Admin password + session | `lib/adminAuth.ts` |
 | Admin photo processing (background removal, lens detection) | `services/frame-processor/` (Python) |
 
@@ -411,7 +413,10 @@ checked across yaw without a camera.
 - The arms must run at the **true width of the head** and reach past the ear.
   Arms modelled too narrow sit inside the head mask and stay hidden even
   head-on.
-- Uncompressed geometry: Draco/meshopt decoders are not bundled.
+- Geometry may be plain or **meshopt-compressed** (`EXT_meshopt_compression`,
+  with `KHR_mesh_quantization`); textures may be PNG/JPEG or **WebP**. That is
+  what `prepare-model` produces, and it is why a served model is a few hundred
+  KB rather than several MB. Draco and KTX2/Basis are *not* supported.
 - **Lenses: hidden by default.** AI generators produce solid, opaque lenses
   baked into the same mesh and material as the frame, which hides the
   customer's eyes — the opposite of what a try-on is for. The admin panel's
@@ -443,13 +448,14 @@ costs:
 
 1. It is stored as a base64 data URL, which inflates the file by a third (a
    5.96MB model becomes a 7.9MB string, and JS strings are UTF-16 in memory).
-2. `lib/productStore.tsx`'s `idbGetAll` reads **every product in full on every
-   page load**, storefront included — not just when the try-on opens. Embedded
-   models therefore slow down pages that never render them.
+2. It sits in the product's database row, so every admin save and JSON
+   export carries it. (The storefront no longer does: the catalogue listing
+   replaces embedded pictures and models with links to
+   `/api/products/{id}/asset/…`, fetched only by whatever shows them.)
 3. Size tracks triangle count, and the try-on renders the model while
    MediaPipe is already using the GPU for face tracking.
 
-Raising the cap only makes (2) worse. Use the served route instead.
+Use the served route instead.
 
 ### Adding a new model
 
@@ -462,10 +468,22 @@ npm run prepare-model -- path/to/raw.glb my-frame
 ```
 
 It simplifies to ~50k triangles (working out the ratio from the model's own
-count), shrinks textures to 1024px, writes
-`public/assets/frames/my-frame.glb`, sanity-checks the proportions, and prints
-the path to paste into `/admin`. Nothing to install — `npx` fetches
-gltf-transform on first use.
+count), shrinks textures to 1024px, compresses the result for download (WebP
+textures, meshopt-coded geometry — typically ~5 MB → under 1 MB with no
+visible change), writes `public/assets/frames/my-frame.glb`, sanity-checks
+the proportions, and prints the path to paste into `/admin`. Nothing to
+install — `npx` fetches gltf-transform on first use.
+
+Models added before the compression step existed can be shrunk in place, all
+at once:
+
+```bash
+npm run optimize-models
+```
+
+It skips anything already compressed and keeps the originals in
+`frames-original/` (outside `public/`, so they are never served). Follow it
+with the same `docker compose restart web`.
 
 **Run it from the checkout you deploy** — a model prepared in a different
 clone isn't on the server at all. Then make the running app notice it:

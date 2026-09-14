@@ -88,12 +88,28 @@ export function ensureSchema(): Promise<void> {
  * means adding a field needs no migration, and nothing here queries by the
  * inner fields anyway.
  */
-export async function listProducts(): Promise<Product[]> {
+export interface ProductRow {
+  data: Product;
+  /** When the row was last written — the version stamped into its asset URLs. */
+  updatedAt: Date;
+}
+
+export async function listProducts(): Promise<ProductRow[]> {
   await ensureSchema();
-  const { rows } = await pool().query<{ data: Product }>(
-    "SELECT data FROM products ORDER BY created_at ASC"
+  const { rows } = await pool().query<{ data: Product; updated_at: Date }>(
+    "SELECT data, updated_at FROM products ORDER BY created_at ASC"
   );
-  return rows.map((r) => r.data);
+  return rows.map((r) => ({ data: r.data, updatedAt: r.updated_at }));
+}
+
+export async function getProduct(id: string): Promise<ProductRow | null> {
+  await ensureSchema();
+  const { rows } = await pool().query<{ data: Product; updated_at: Date }>(
+    "SELECT data, updated_at FROM products WHERE id = $1",
+    [id]
+  );
+  const row = rows[0];
+  return row ? { data: row.data, updatedAt: row.updated_at } : null;
 }
 
 export async function upsertProduct(product: Product): Promise<void> {

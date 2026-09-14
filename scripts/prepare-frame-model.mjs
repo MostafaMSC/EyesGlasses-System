@@ -6,8 +6,10 @@
  *
  * A raw model straight out of an AI generator is unusable as-is: hundreds of
  * thousands of triangles and tens of megabytes. This simplifies it, shrinks
- * its textures, drops it into `public/assets/frames/`, and prints the path to
- * paste into /admin.
+ * its textures, compresses it for download (WebP textures, meshopt geometry),
+ * drops it into `public/assets/frames/`, and prints the path to paste into
+ * /admin. Models that were added before this compressed can be shrunk in
+ * place with `npm run optimize-models`.
  *
  * Run it from the checkout you actually deploy — a model prepared in a
  * different clone isn't on the server at all. `public/assets/frames` is
@@ -23,56 +25,12 @@ import { execSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { compress, describe, fail, GLTF_TRANSFORM, readGlbJson } from "./glb-utils.mjs";
 
 /** Triangles to aim for. Plenty for eyewear, cheap enough to render on a phone. */
 const TARGET_TRIANGLES = 50_000;
 const TEXTURE_SIZE = 1024;
 const DEST_DIR = join("public", "assets", "frames");
-const GLTF_TRANSFORM = "npx --yes @gltf-transform/cli@4";
-
-function fail(message) {
-  console.error(`\n✗ ${message}\n`);
-  process.exit(1);
-}
-
-/**
- * Reads the glTF JSON chunk out of a .glb without a parser. A GLB is a
- * 12-byte header followed by length-prefixed chunks, the first of which is
- * the JSON — enough to get triangle counts and the bounding box, since glTF
- * stores each accessor's own min/max.
- */
-function readGlbJson(path) {
-  const buf = readFileSync(path);
-  if (buf.length < 20 || buf.readUInt32LE(0) !== 0x46546c67) {
-    fail(`${path} is not a binary .glb file. Export as glTF-Binary (.glb).`);
-  }
-  const chunkLength = buf.readUInt32LE(12);
-  return JSON.parse(buf.subarray(20, 20 + chunkLength).toString("utf8"));
-}
-
-function describe(gltf) {
-  let triangles = 0;
-  const min = [Infinity, Infinity, Infinity];
-  const max = [-Infinity, -Infinity, -Infinity];
-
-  for (const mesh of gltf.meshes ?? []) {
-    for (const prim of mesh.primitives ?? []) {
-      const indices = gltf.accessors?.[prim.indices];
-      const position = gltf.accessors?.[prim.attributes?.POSITION];
-      // Un-indexed geometry counts its vertices instead.
-      triangles += Math.floor((indices?.count ?? position?.count ?? 0) / 3);
-      if (position?.min && position?.max) {
-        for (let a = 0; a < 3; a++) {
-          min[a] = Math.min(min[a], position.min[a]);
-          max[a] = Math.max(max[a], position.max[a]);
-        }
-      }
-    }
-  }
-
-  const size = max.map((v, a) => v - min[a]);
-  return { triangles, size };
-}
 
 const [inputArg, nameArg] = process.argv.slice(2);
 if (!inputArg) {
@@ -105,6 +63,7 @@ const work = mkdtempSync(join(tmpdir(), "frame-model-"));
 const step1 = join(work, "1.glb");
 const step2 = join(work, "2.glb");
 const step3 = join(work, "3.glb");
+const step4 = join(work, "4.glb");
 
 try {
   const q = (p) => `"${p}"`;
@@ -128,10 +87,17 @@ try {
     stdio: ["ignore", "inherit", "inherit"],
   });
 
+  // Last, because simplification and resizing want the uncompressed data:
+  // this is what takes the file from megabytes to hundreds of kilobytes.
+  compress(step3, step4, work);
+
   mkdirSync(DEST_DIR, { recursive: true });
   const dest = join(DEST_DIR, `${name}.glb`);
-  copyFileSync(step3, dest);
+  copyFileSync(step4, dest);
 
+  // Measured before compression: quantised positions are stored as integers
+  // with the real scale on the node, so the compressed file's accessor
+  // min/max no longer read as model units.
   const after = describe(readGlbJson(step3));
   const outMb = (readFileSync(dest).length / 1e6).toFixed(2);
 

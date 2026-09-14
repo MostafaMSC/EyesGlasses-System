@@ -2,7 +2,12 @@
 
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { Product } from "@/data/products";
-import { buildFallbackModel, loadGlassesModel, type GlassesModel } from "@/lib/threeTryOn/glassesModel";
+import {
+  buildFallbackModel,
+  isGlassesModelReady,
+  loadGlassesModel,
+  type GlassesModel,
+} from "@/lib/threeTryOn/glassesModel";
 import { TryOnScene, type FaceFrameInput } from "@/lib/threeTryOn/tryOnScene";
 
 /** On-screen rectangle the camera feed actually occupies, in CSS pixels. */
@@ -12,6 +17,9 @@ export interface OverlayRect {
   width: number;
   height: number;
 }
+
+/** How long a frame may take to arrive before the loading badge shows. */
+const LOADING_HINT_DELAY_MS = 250;
 
 export interface GlassesOverlay3DHandle {
   /**
@@ -37,6 +45,12 @@ export const GlassesOverlay3D = forwardRef<
   /** Models we built ourselves and must dispose; cached GLBs are shared. */
   const ownedModelRef = useRef<GlassesModel | null>(null);
   const [modelError, setModelError] = useState(false);
+  /**
+   * True while the selected frame is still downloading. The previous frame
+   * stays on the face until the new one arrives, so this is only a hint —
+   * and it is never shown for a frame that is already in memory.
+   */
+  const [modelLoading, setModelLoading] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -73,7 +87,14 @@ export const GlassesOverlay3D = forwardRef<
     };
 
     setModelError(false);
+    // A short grace period before the hint appears: a preloaded neighbour
+    // resolves in the same tick, and even a cached-but-still-parsing model is
+    // faster than a spinner is worth.
+    let hintTimer: ReturnType<typeof setTimeout> | null = null;
     if (modelSource) {
+      if (!isGlassesModelReady(modelSource, { hideLenses })) {
+        hintTimer = setTimeout(() => setModelLoading(true), LOADING_HINT_DELAY_MS);
+      }
       loadGlassesModel(modelSource, { hideLenses })
         .then((model) => install(model, false))
         .catch((err) => {
@@ -83,6 +104,10 @@ export const GlassesOverlay3D = forwardRef<
           // Something on the face beats an empty overlay, and the placeholder
           // still exercises the tracking.
           install(buildFallbackModel(product.tryOn), true);
+        })
+        .finally(() => {
+          if (hintTimer) clearTimeout(hintTimer);
+          if (!cancelled) setModelLoading(false);
         });
     } else {
       install(buildFallbackModel(product.tryOn), true);
@@ -90,6 +115,8 @@ export const GlassesOverlay3D = forwardRef<
 
     return () => {
       cancelled = true;
+      if (hintTimer) clearTimeout(hintTimer);
+      setModelLoading(false);
     };
   }, [modelSource, hideLenses, product.tryOn]);
 
@@ -136,6 +163,16 @@ export const GlassesOverlay3D = forwardRef<
         <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-6" style={{ transform: "scaleX(-1)" }}>
           <p className="glass-dark rounded-full px-4 py-2 text-center text-xs font-semibold text-white">
             تعذّر تحميل المجسم ثلاثي الأبعاد، يتم عرض شكل تقريبي
+          </p>
+        </div>
+      )}
+      {modelLoading && !modelError && (
+        // Only the frame is loading — the camera and tracking carry on
+        // underneath, so this is a small badge rather than a blocking screen.
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-6" style={{ transform: "scaleX(-1)" }}>
+          <p className="glass-dark flex items-center gap-2 rounded-full px-4 py-2 text-center text-xs font-semibold text-white">
+            <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            جاري تحميل الإطار…
           </p>
         </div>
       )}

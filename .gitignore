@@ -58,3 +58,6 @@ services/frame-processor/*.pyc
 
 # Database dumps taken next to the checkout (see README, "Backups").
 *.sql.gz
+
+# Uncompressed originals kept by `npm run optimize-models`
+frames-original/

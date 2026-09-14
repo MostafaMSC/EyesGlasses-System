@@ -11,3 +11,4 @@ npm-debug.log*
 services/frame-processor/venv
 services/frame-processor/__pycache__
 services/frame-processor/**/__pycache__
+frames-original
