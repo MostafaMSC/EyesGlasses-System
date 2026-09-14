@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { defaultSettings, type SiteSettings } from "@/data/siteSettings";
 import { runtimeConfig } from "@/lib/runtimeConfig";
 
@@ -28,19 +28,36 @@ async function fetchSettings(): Promise<SiteSettings> {
   return body.settings;
 }
 
-export function SettingsProvider({ children }: { children: ReactNode }) {
-  const [settings, setSettings] = useState<SiteSettings>(defaultSettings);
-  const [loaded, setLoaded] = useState(false);
+/**
+ * Keeps the hook-less helpers (price formatting, WhatsApp links) in step —
+ * before the state update, so the very render that shows the new settings
+ * already formats with them.
+ */
+function applyRuntime(settings: SiteSettings) {
+  runtimeConfig.currency = settings.store.currency || defaultSettings.store.currency;
+  runtimeConfig.whatsappNumber = settings.store.whatsappNumber || defaultSettings.store.whatsappNumber;
+  runtimeConfig.storeName = settings.store.name || defaultSettings.store.name;
+}
 
-  const reload = async () => {
+export function SettingsProvider({ children }: { children: ReactNode }) {
+  const [settings, setSettingsState] = useState<SiteSettings>(defaultSettings);
+  const [loaded, setLoaded] = useState(false);
+  const setSettings = (s: SiteSettings) => {
+    applyRuntime(s);
+    setSettingsState(s);
+  };
+
+  const reload = useCallback(async () => {
     try {
-      setSettings(await fetchSettings());
+      const s = await fetchSettings();
+      applyRuntime(s);
+      setSettingsState(s);
     } catch (err) {
       console.error("[settings] Could not load the site settings", err);
     } finally {
       setLoaded(true);
     }
-  };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,14 +70,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Keep the hook-less helpers (price formatting, WhatsApp links) in step.
-  useEffect(() => {
-    runtimeConfig.currency = settings.store.currency || defaultSettings.store.currency;
-    runtimeConfig.whatsappNumber = settings.store.whatsappNumber || defaultSettings.store.whatsappNumber;
-    runtimeConfig.storeName = settings.store.name || defaultSettings.store.name;
-  }, [settings]);
-
-  const value = useMemo(() => ({ settings, loaded, reload }), [settings, loaded]);
+  const value = useMemo(() => ({ settings, loaded, reload }), [settings, loaded, reload]);
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;
 }
 

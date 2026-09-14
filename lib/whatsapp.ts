@@ -5,13 +5,10 @@ import { runtimeConfig } from "@/lib/runtimeConfig";
 
 const NL = "\n";
 
-/** The product's page on this site, for pasting into a message. */
-function productUrl(product: Pick<Product, "slug">): string {
-  if (typeof window === "undefined") return `/products/${product.slug}`;
-  return `${window.location.origin}/products/${product.slug}`;
-}
-
-export function buildProductWhatsAppMessage(product: Product, options?: { triedOn?: boolean }): string {
+export function buildProductWhatsAppMessage(
+  product: Product,
+  options?: { triedOn?: boolean; origin?: string }
+): string {
   const lines = [
     "السلام عليكم، أريد الاستفسار/طلب النظارة:",
     `الماركة: ${product.brand}`,
@@ -19,7 +16,8 @@ export function buildProductWhatsAppMessage(product: Product, options?: { triedO
   ];
   if (product.sku) lines.push(`الكود: ${product.sku}`);
   lines.push(`السعر: ${formatPrice(product.price)}`);
-  lines.push(productUrl(product));
+  // The product's page, for the shop to open straight from the chat.
+  lines.push(`${options?.origin ?? ""}/products/${product.slug}`);
   if (options?.triedOn) {
     lines.push("وقد جربتها افتراضياً على الموقع.");
   }
@@ -44,7 +42,7 @@ export function buildWhatsAppUrl(message: string): string {
 }
 
 export function openWhatsAppOrder(product: Product, options?: { triedOn?: boolean }): void {
-  const message = buildProductWhatsAppMessage(product, options);
+  const message = buildProductWhatsAppMessage(product, { ...options, origin: window.location.origin });
   const url = buildWhatsAppUrl(message);
   window.open(url, "_blank", "noopener,noreferrer");
 }

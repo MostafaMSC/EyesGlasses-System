@@ -23,6 +23,7 @@ import { formatPrice } from "@/lib/format";
 import { availabilityLabel, availabilityTone } from "@/lib/availability";
 import { buildProductWhatsAppMessage, buildWhatsAppUrl } from "@/lib/whatsapp";
 import { track } from "@/lib/analytics";
+import { useOrigin } from "@/lib/useOrigin";
 import { Container } from "@/components/ui/Container";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -119,7 +120,8 @@ export function ProductPageClient({ product: initial, discount }: { product: Pro
 
   const shippingPage = settings.pages.pages.find((p) => p.slug === "shipping" && p.published);
   const returnsPage = settings.pages.pages.find((p) => p.slug === "returns" && p.published);
-  const whatsappAsk = buildWhatsAppUrl(buildProductWhatsAppMessage(product));
+  const origin = useOrigin();
+  const whatsappAsk = buildWhatsAppUrl(buildProductWhatsAppMessage(product, { origin }));
 
   return (
     <div className="pb-28 pt-6 sm:pb-16 sm:pt-10">

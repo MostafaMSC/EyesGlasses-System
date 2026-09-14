@@ -1,9 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import Link from "next/link";
 import { frameSvgDataUri, type FrameShape } from "@/lib/frameShapes";
-import { getProductVisualSrc, type Availability, type Category, type Product } from "@/data/products";
+import { getProductVisualSrc, type Availability, type Product } from "@/data/products";
+import { AdminShell } from "@/components/admin/AdminShell";
+import {
+  commerceToProduct,
+  EMPTY_COMMERCE,
+  ProductCommerceFields,
+  productToCommerce,
+  type CommerceFormState,
+} from "@/components/admin/ProductCommerceFields";
 import { fetchProductsFull, newProductId, slugify, useProductStore } from "@/lib/productStore";
 import { stripModelVersion } from "@/lib/modelPath";
 import {
@@ -17,7 +24,6 @@ import {
 } from "@/lib/processFrameImage";
 import { useShopUI } from "@/context/ShopUIContext";
 import { formatPrice } from "@/lib/format";
-import { Container } from "@/components/ui/Container";
 import { Button } from "@/components/ui/Button";
 import { IconGlasses, IconClose, IconDownload, IconCamera } from "@/components/ui/Icons";
 
@@ -34,10 +40,6 @@ const FRAME_SHAPES: { value: FrameShape; label: string }[] = [
   { value: "sport", label: "رياضي" },
 ];
 
-const CATEGORIES: { value: Category; label: string }[] = [
-  { value: "sunglasses", label: "نظارات شمسية" },
-  { value: "optical", label: "نظارات طبية" },
-];
 
 const AVAILABILITY: { value: Availability; label: string }[] = [
   { value: "in_stock", label: "متوفر" },
@@ -56,8 +58,9 @@ const MAX_MODEL_BYTES = 8_000_000;
 interface FormState {
   brand: string;
   name: string;
-  category: Category;
   price: string;
+  /** Pricing, stock, gallery, specs — see ProductCommerceFields. */
+  commerce: CommerceFormState;
   description: string;
   availability: Availability;
   colorName: string;
@@ -93,8 +96,8 @@ interface FormState {
 const EMPTY: FormState = {
   brand: "",
   name: "",
-  category: "optical",
   price: "",
+  commerce: EMPTY_COMMERCE,
   description: "",
   availability: "in_stock",
   colorName: "أسود",
@@ -142,19 +145,6 @@ export default function AdminPage() {
     importProducts,
   } = useProductStore();
   const { openTryOn } = useShopUI();
-
-  /** "checking" until the session cookie has been verified with the server. */
-  const [session, setSession] = useState<AdminSessionState>("checking");
-
-  useEffect(() => {
-    fetch("/api/admin/session")
-      .then((res) => res.json())
-      .then((body: { configured?: boolean; authenticated?: boolean }) => {
-        if (!body.configured) setSession("unconfigured");
-        else setSession(body.authenticated ? "in" : "out");
-      })
-      .catch(() => setSession("out"));
-  }, []);
 
   const [form, setForm] = useState<FormState>(EMPTY);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -205,19 +195,20 @@ export default function AdminPage() {
 
   const buildProduct = (id: string): Product => ({
     id,
-    slug: slugify(`${form.brand}-${form.name}`),
+    // An existing product keeps its slug: it is the product's URL.
+    slug: (editingId && customProducts.find((p) => p.id === editingId)?.slug) || slugify(`${form.brand}-${form.name}`),
     brand: form.brand.trim(),
     name: form.name.trim(),
-    category: form.category,
+    category: form.commerce.category,
     price: Number(form.price) || 0,
     images: [],
+    ...commerceToProduct(form.commerce),
     description: form.description.trim() || "—",
     colors: [{ name: form.colorName || "أساسي", hex: form.color }],
     availability: form.availability,
     bestseller: form.bestseller,
     isNew: form.isNew,
-    featured: form.bestseller,
-    createdAt: new Date().toISOString().slice(0, 10),
+    createdAt: (editingId && customProducts.find((p) => p.id === editingId)?.createdAt) || new Date().toISOString().slice(0, 10),
     tryOn: {
       frameShape: form.frameShape,
       color: form.color,
@@ -390,8 +381,8 @@ export default function AdminPage() {
     setForm({
       brand: product.brand,
       name: product.name,
-      category: product.category,
       price: String(product.price),
+      commerce: productToCommerce(product),
       description: product.description,
       availability: product.availability,
       colorName: product.colors[0]?.name ?? "أساسي",
@@ -449,38 +440,12 @@ export default function AdminPage() {
 
   // The catalogue is shared and server-stored now, so the panel stays shut
   // until the password is accepted.
-  if (session !== "in") {
-    return <AdminLogin state={session} onAuthenticated={() => setSession("in")} />;
-  }
-
   return (
-    <div className="py-8 sm:py-12">
-      <Container>
-        <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h1 className="font-display text-2xl font-extrabold text-ink sm:text-3xl">
-              لوحة إدارة النظارات
-            </h1>
-            <p className="mt-2 text-sm text-muted">
-              أضف نظارة جديدة وجربها على الكاميرا مباشرة. تُحفظ على السيرفر وتظهر لكل الزوار.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Button href="/catalog" variant="secondary" size="sm">
-              عرض المتجر
-            </Button>
-            <button
-              type="button"
-              onClick={async () => {
-                await fetch("/api/admin/session", { method: "DELETE" });
-                setSession("out");
-              }}
-              className="rounded-full border border-line px-4 py-1.5 text-xs font-bold text-ink-soft transition hover:border-accent/40 hover:text-ink"
-            >
-              خروج
-            </button>
-          </div>
-        </div>
+    <AdminShell
+      title="المنتجات"
+      subtitle="أضف نظارة جديدة وجربها على الكاميرا مباشرة. تُحفظ على السيرفر وتظهر لكل الزوار."
+    >
+      <>
 
         {strandedLocalProducts.length > 0 && (
           // Products from before the catalogue moved to the server. They are
@@ -544,11 +509,6 @@ export default function AdminPage() {
               <Field label="السعر (د.ع)">
                 <input className={inputCls} type="number" inputMode="numeric" value={form.price} onChange={(e) => set("price", e.target.value)} placeholder="185000" />
               </Field>
-              <Field label="النوع">
-                <select className={inputCls} value={form.category} onChange={(e) => set("category", e.target.value as Category)}>
-                  {CATEGORIES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-                </select>
-              </Field>
               <Field label="التوفر">
                 <select className={inputCls} value={form.availability} onChange={(e) => set("availability", e.target.value as Availability)}>
                   {AVAILABILITY.map((a) => <option key={a.value} value={a.value}>{a.label}</option>)}
@@ -562,6 +522,12 @@ export default function AdminPage() {
             <Field label="الوصف" className="mt-4">
               <textarea className={`${inputCls} min-h-[80px]`} value={form.description} onChange={(e) => set("description", e.target.value)} />
             </Field>
+
+            <ProductCommerceFields
+              value={form.commerce}
+              onChange={(commerce) => set("commerce", commerce)}
+              onError={(text) => setMessage({ kind: "error", text })}
+            />
 
             <hr className="my-6 border-line" />
             <h3 className="mb-4 text-sm font-bold text-ink">شكل النظارة</h3>
@@ -952,10 +918,10 @@ export default function AdminPage() {
           النظارات المضافة تُحفظ على السيرفر وتظهر لكل الزوار على أي جهاز.
           استخدم <strong>تصدير JSON</strong> لأخذ نسخة احتياطية، و<strong>استيراد JSON</strong>
           لنقل الكاتالوج إلى سيرفر آخر. راجع{" "}
-          <Link href="/catalog" className="text-accent underline">الدليل في README</Link>.
+          راجع الدليل في README.
         </div>
-      </Container>
-    </div>
+      </>
+    </AdminShell>
   );
 }
 
@@ -1576,87 +1542,6 @@ function Model3dField({
           جاري قراءة الملف…
         </p>
       )}
-    </div>
-  );
-}
-
-type AdminSessionState = "checking" | "out" | "in" | "unconfigured";
-
-/**
- * Password gate. The password itself is only ever checked on the server (see
- * lib/adminAuth.ts) — this just posts it and relies on the httpOnly session
- * cookie that comes back.
- */
-function AdminLogin({
-  state,
-  onAuthenticated,
-}: {
-  state: AdminSessionState;
-  onAuthenticated: () => void;
-}) {
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/admin/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-      const body = (await res.json().catch(() => null)) as { error?: string } | null;
-      if (!res.ok) throw new Error(body?.error ?? "تعذّر تسجيل الدخول.");
-      onAuthenticated();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "تعذّر تسجيل الدخول.");
-      setPassword("");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="py-16">
-      <Container>
-        <div className="mx-auto max-w-sm rounded-3xl border border-line bg-surface-2 p-6">
-          <h1 className="font-display text-xl font-extrabold text-ink">لوحة إدارة النظارات</h1>
-
-          {state === "checking" && <p className="mt-3 text-sm text-muted">جاري التحقق…</p>}
-
-          {state === "unconfigured" && (
-            <p className="mt-3 text-sm leading-6 text-danger">
-              لم يتم تعيين <code>ADMIN_PASSWORD</code> على هذا السيرفر، فلوحة التحكم معطّلة.
-              أضفها إلى ملف <code>.env</code> وأعد تشغيل الحاوية.
-            </p>
-          )}
-
-          {(state === "out" || state === "in") && (
-            <form onSubmit={submit} className="mt-4">
-              <label className="block text-xs font-bold text-ink-soft">كلمة المرور</label>
-              <input
-                type="password"
-                value={password}
-                autoFocus
-                autoComplete="current-password"
-                onChange={(e) => setPassword(e.target.value)}
-                className={`${inputCls} mt-1`}
-              />
-              {error && <p className="mt-2 text-[11px] font-bold text-danger">{error}</p>}
-              <Button type="submit" variant="primary" size="md" className="mt-4 w-full" disabled={busy}>
-                {busy ? "جاري الدخول…" : "دخول"}
-              </Button>
-            </form>
-          )}
-
-          <Button href="/" variant="secondary" size="sm" className="mt-4 w-full">
-            رجوع للمتجر
-          </Button>
-        </div>
-      </Container>
     </div>
   );
 }
