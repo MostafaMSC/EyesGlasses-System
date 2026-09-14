@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { getProduct, listProducts, upsertProduct } from "@/lib/db";
 import { isAdminRequest, requireAdmin } from "@/lib/adminAuth";
 import { resolveIncomingAssets, toPublicProduct } from "@/lib/productAssets";
+import { ratingSummary } from "@/lib/reviewsDb";
 import type { Product } from "@/data/products";
 
 /** Reads hit Postgres every time — the catalogue is editable from the admin panel. */
@@ -29,7 +30,14 @@ export async function GET(request: Request) {
 
   try {
     const rows = await listProducts();
-    const products = full ? rows.map((r) => r.data) : rows.map((r) => toPublicProduct(r.data, r.updatedAt));
+    let products: Product[];
+    if (full) {
+      products = rows.map((r) => r.data);
+    } else {
+      // Approved-review averages ride along, for the cards and the rating sort.
+      const ratings = await ratingSummary();
+      products = rows.map((r) => ({ ...toPublicProduct(r.data, r.updatedAt), rating: ratings.get(r.data.id) }));
+    }
     const body = JSON.stringify({ products });
     const etag = `W/"${createHash("sha1").update(body).digest("base64url")}"`;
     const headers = {

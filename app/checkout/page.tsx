@@ -41,6 +41,10 @@ export default function CheckoutPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [restored, setRestored] = useState(false);
+  const [couponInput, setCouponInput] = useState("");
+  const [coupon, setCoupon] = useState<{ code: string; discount: number } | null>(null);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [couponBusy, setCouponBusy] = useState(false);
 
   // Remember who the customer is between orders, on this device only.
   useEffect(() => {
@@ -60,7 +64,30 @@ export default function CheckoutPage() {
   const zone = zones.find((z) => z.name === form.governorate);
   const freeDelivery = commerce.freeDeliveryThreshold > 0 && cart.subtotal >= commerce.freeDeliveryThreshold;
   const deliveryFee = zone ? (freeDelivery ? 0 : zone.fee) : null;
-  const total = cart.subtotal + (deliveryFee ?? 0);
+  const discount = coupon ? Math.min(coupon.discount, cart.subtotal) : 0;
+  const total = cart.subtotal - discount + (deliveryFee ?? 0);
+
+  const applyCoupon = async () => {
+    const code = couponInput.trim();
+    if (!code) return;
+    setCouponBusy(true);
+    setCouponError(null);
+    try {
+      const res = await fetch("/api/coupons/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, phone: form.phone, items: cart.entries.map((e) => ({ productId: e.productId, quantity: e.quantity })) }),
+      });
+      const data = (await res.json().catch(() => null)) as { code?: string; discount?: number; error?: string } | null;
+      if (!res.ok || !data?.code) throw new Error(data?.error ?? "الكوبون غير صالح.");
+      setCoupon({ code: data.code, discount: data.discount ?? 0 });
+    } catch (err) {
+      setCoupon(null);
+      setCouponError(err instanceof Error ? err.message : "الكوبون غير صالح.");
+    } finally {
+      setCouponBusy(false);
+    }
+  };
   const belowMin = commerce.minOrderAmount > 0 && cart.subtotal < commerce.minOrderAmount;
   const method = methods.find((m) => m.id === paymentId);
 
@@ -78,6 +105,7 @@ export default function CheckoutPage() {
         customer: form,
         items: cart.entries.map((e) => ({ productId: e.productId, quantity: e.quantity, color: e.color })),
         paymentMethodId: method.id,
+        couponCode: coupon?.code,
       };
       const res = await fetch("/api/orders", {
         method: "POST",
@@ -225,11 +253,41 @@ export default function CheckoutPage() {
                 </li>
               ))}
             </ul>
+            <div className="mt-4 border-t border-line pt-4">
+              {coupon ? (
+                <p className="flex items-center justify-between rounded-2xl bg-success/10 px-3 py-2 text-xs font-bold text-success">
+                  <span>كوبون {coupon.code} مطبّق</span>
+                  <button type="button" onClick={() => { setCoupon(null); setCouponInput(""); }} className="underline">
+                    إزالة
+                  </button>
+                </p>
+              ) : (
+                <div className="flex gap-2">
+                  <input
+                    value={couponInput}
+                    onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                    placeholder="رمز الكوبون"
+                    dir="ltr"
+                    className="field flex-1 text-left"
+                  />
+                  <Button type="button" variant="secondary" size="md" onClick={applyCoupon} disabled={couponBusy || !couponInput.trim()}>
+                    تطبيق
+                  </Button>
+                </div>
+              )}
+              {couponError && <p className="mt-2 text-xs font-bold text-danger">{couponError}</p>}
+            </div>
             <dl className="mt-4 flex flex-col gap-2 border-t border-line pt-4 text-sm">
               <div className="flex justify-between">
                 <dt className="text-muted">المجموع الفرعي</dt>
                 <dd className="font-bold text-ink">{formatPrice(cart.subtotal)}</dd>
               </div>
+              {discount > 0 && (
+                <div className="flex justify-between text-success">
+                  <dt>الخصم</dt>
+                  <dd className="font-bold">- {formatPrice(discount)}</dd>
+                </div>
+              )}
               <div className="flex justify-between">
                 <dt className="text-muted">التوصيل{zone ? ` (${zone.name})` : ""}</dt>
                 <dd className="font-bold text-ink">

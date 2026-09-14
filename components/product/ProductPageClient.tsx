@@ -29,6 +29,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { ProductGrid } from "@/components/eyewear/ProductGrid";
 import { PageBody } from "@/components/pages/PageBody";
+import { ProductReviews, Stars } from "@/components/product/ProductReviews";
 import {
   IconCamera,
   IconCart,
@@ -211,6 +212,11 @@ export function ProductPageClient({ product: initial, discount }: { product: Pro
                   الكود: <span dir="ltr">{product.sku}</span>
                 </p>
               )}
+              {product.rating && product.rating.count > 0 && (
+                <p className="mt-2 flex items-center gap-2 text-xs text-ink-soft">
+                  <Stars value={product.rating.average} size="h-3.5 w-3.5" /> {product.rating.average} ({product.rating.count} تقييم)
+                </p>
+              )}
               {product.shortDescription && <p className="mt-3 text-sm leading-7 text-ink-soft">{product.shortDescription}</p>}
             </div>
 
@@ -369,6 +375,7 @@ export function ProductPageClient({ product: initial, discount }: { product: Pro
                 <PageBody body={returnsPage.body} compact />
               </Section>
             )}
+            <ProductReviews product={product} />
             <Section title="أسئلة شائعة" compact>
               <p className="text-sm leading-7 text-ink-soft">
                 كل ما تحتاج معرفته عن التجربة الافتراضية والتوصيل والدفع.{" "}

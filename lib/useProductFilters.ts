@@ -19,6 +19,7 @@ export type SortOption =
   | "price_asc"
   | "price_desc"
   | "bestselling"
+  | "rating"
   | "discount";
 
 export const sortOptions: { value: SortOption; label: string }[] = [
@@ -27,6 +28,7 @@ export const sortOptions: { value: SortOption; label: string }[] = [
   { value: "price_asc", label: "السعر: من الأقل للأعلى" },
   { value: "price_desc", label: "السعر: من الأعلى للأقل" },
   { value: "bestselling", label: "الأكثر مبيعاً" },
+  { value: "rating", label: "الأعلى تقييماً" },
   { value: "discount", label: "أكبر خصم" },
 ];
 
@@ -188,6 +190,8 @@ export function useProductFilters() {
         return [...list].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
       case "bestselling":
         return [...list].sort((a, b) => Number(b.bestseller) - Number(a.bestseller));
+      case "rating":
+        return [...list].sort((a, b) => (b.rating?.average ?? 0) - (a.rating?.average ?? 0) || (b.rating?.count ?? 0) - (a.rating?.count ?? 0));
       case "discount":
         return [...list].sort((a, b) => discountPercent(b) - discountPercent(a));
       case "recommended":

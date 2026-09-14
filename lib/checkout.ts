@@ -6,6 +6,7 @@ import { getProduct, upsertProduct } from "@/lib/db";
 import { insertOrder, nextOrderNumber } from "@/lib/ordersDb";
 import { getSettingsSection } from "@/lib/settingsDb";
 import { toPublicProduct } from "@/lib/productAssets";
+import { CouponError, evaluateCoupon } from "@/lib/coupons";
 
 /**
  * Turns what the storefront submits into a priced, numbered order.
@@ -125,7 +126,24 @@ export async function placeOrder(raw: unknown): Promise<Order> {
   const deliveryFee = deliveryFeeFor(commerce, governorate, subtotal);
   if (deliveryFee === null) throw new CheckoutError("التوصيل غير متاح لهذه المحافظة حالياً.");
 
-  const discount = 0;
+  // The coupon is evaluated again here, not trusted from the preview.
+  let discount = 0;
+  let couponCode: string | undefined;
+  const requestedCode = text(req.couponCode, 40);
+  if (requestedCode) {
+    try {
+      const result = await evaluateCoupon(
+        requestedCode,
+        Array.from(lines.values()).map((l) => ({ product: l.product, quantity: l.quantity })),
+        phone
+      );
+      discount = result.discount;
+      couponCode = result.coupon.code;
+    } catch (err) {
+      if (err instanceof CouponError) throw new CheckoutError(err.message);
+      throw err;
+    }
+  }
   const now = new Date().toISOString();
   const order: Order = {
     id: `o${Date.now().toString(36)}${randomBytes(3).toString("hex")}`,
@@ -136,6 +154,7 @@ export async function placeOrder(raw: unknown): Promise<Order> {
     items: orderItems,
     subtotal,
     discount,
+    couponCode,
     deliveryFee,
     total: subtotal - discount + deliveryFee,
     payment: { id: method.id, label: method.label, instructions: method.instructions },

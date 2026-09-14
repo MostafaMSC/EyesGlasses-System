@@ -20,6 +20,7 @@ export const ADMIN_SECTIONS = [
   { href: "/admin", label: "المنتجات" },
   { href: "/admin/orders", label: "الطلبات" },
   { href: "/admin/customers", label: "العملاء" },
+  { href: "/admin/reviews", label: "التقييمات" },
   { href: "/admin/content", label: "المحتوى" },
   { href: "/admin/settings", label: "الإعدادات" },
 ];

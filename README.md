@@ -1,4 +1,4 @@
-# عوينات أبي ذر — Virtual Try-On MVP
+# عوينات أبي ذر — Eyewear shop with virtual try-on
 
 Arabic-first (RTL) eyewear storefront with a browser-based virtual try-on and
 direct WhatsApp ordering.
@@ -140,6 +140,42 @@ invalidates every existing session. Every write endpoint checks it; reads are
 public, because the catalogue is.
 
 ---
+
+## The shop
+
+Beyond the try-on, the site is a complete storefront: product pages
+(`/products/<slug>`), site search with suggestions, catalogue filters and
+sorting, a persisted cart, checkout with Iraqi governorates and configurable
+payment methods, order numbers and tracking (`/track`), wishlist, coupons,
+product reviews (published after moderation), and CMS pages
+(`/pages/<slug>`). The admin panel has a section for each:
+
+| Admin page | What the owner does there |
+| --- | --- |
+| `/admin/dashboard` | Sales, orders by status, low stock, top sellers, and which frames are tried on most vs. bought |
+| `/admin` | Products: pictures by view, price/sale price, stock, SKU, frame specs and dimensions, try-on setup, SEO |
+| `/admin/orders` | Search/filter orders, change order and payment status, internal notes, WhatsApp the customer |
+| `/admin/customers` | Customers as revealed by their orders, with history |
+| `/admin/reviews` | Approve, reject or delete customer reviews |
+| `/admin/content` | Hero, stats, trust badges, banners, homepage sections, header/footer menus, information pages |
+| `/admin/settings` | Store identity and logo, contact and social links, working hours, SEO, delivery zones and fees, payment methods, categories, brands, coupons |
+
+Everything the owner edits lives in the `settings` table (one JSON document
+per section, defaults in `data/siteSettings.ts` so a fresh database is a
+complete site). Orders are in `orders`, analytics events in `events`,
+reviews in `reviews` — all created on first request, no migrations. Money is
+never trusted from the browser: `lib/checkout.ts` re-prices every order from
+the catalogue rows, the configured zone and the coupon.
+
+The public API (`/api/products`, `/api/settings`) sends pictures as small
+versioned URLs rather than inline data, with ETags, so the storefront stays
+fast; see `lib/productAssets.ts` and `lib/settingsDb.ts`.
+
+**Access control.** One shared `ADMIN_PASSWORD` (see below) guards every
+admin page and every write endpoint through `requireAdmin()` in
+`lib/adminAuth.ts` — the single place to grow into per-user roles later.
+Customer accounts, online payment and prescription entry are not built yet;
+the order document (`data/orders.ts`) is where prescription fields would go.
 
 ## Admin panel — adding frames without touching code
 

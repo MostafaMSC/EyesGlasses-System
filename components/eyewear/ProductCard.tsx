@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { IconCamera, IconCart, IconGlasses, IconHeart, IconStar } from "@/components/ui/Icons";
 import { cn } from "@/lib/cn";
+import { Stars } from "@/components/product/ProductReviews";
 
 export function ProductCard({ product, index = 0 }: { product: Product; index?: number }) {
   const { openTryOn } = useShopUI();
@@ -90,6 +91,12 @@ export function ProductCard({ product, index = 0 }: { product: Product; index?: 
             {product.name}
           </Link>
         </div>
+
+        {product.rating && product.rating.count > 0 && (
+          <p className="-mt-1.5 flex items-center gap-1.5 text-[11px] text-muted">
+            <Stars value={product.rating.average} size="h-3 w-3" /> ({product.rating.count})
+          </p>
+        )}
 
         <div className="flex items-baseline gap-2">
           <span className="text-base font-extrabold text-ink">{formatPrice(product.price)}</span>

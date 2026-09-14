@@ -131,8 +131,10 @@ export function toPublicProduct(product: Product, updatedAt: Date): Product {
  * A URL for an asset the stored row no longer has is simply removed.
  */
 export function resolveIncomingAssets(incoming: Product, stored: Product | null): Product {
+  const { rating: _rating, ...rest } = incoming;
+  void _rating;
   const out: Product = {
-    ...incoming,
+    ...rest,
     images: [...(incoming.images ?? [])],
     gallery: incoming.gallery?.map((g) => ({ ...g })),
     tryOn: { ...incoming.tryOn },

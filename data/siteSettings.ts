@@ -188,6 +188,31 @@ export interface PagesSettings {
   pages: PageDef[];
 }
 
+export type CouponType = "percent" | "fixed";
+
+export interface Coupon {
+  id: string;
+  /** Upper-cased; what the customer types. */
+  code: string;
+  type: CouponType;
+  /** Percent (1–100) or a fixed amount in the store currency. */
+  value: number;
+  minOrderAmount: number;
+  /** Restrict to these products / categories; empty means the whole order. */
+  productIds: string[];
+  categorySlugs: string[];
+  /** ISO date; empty means never. */
+  expiresAt: string;
+  /** 0 = unlimited. Uses are counted from orders that carry the code. */
+  maxUses: number;
+  perCustomerLimit: number;
+  active: boolean;
+}
+
+export interface PromotionsSettings {
+  coupons: Coupon[];
+}
+
 export interface SiteSettings {
   store: StoreSettings;
   commerce: CommerceSettings;
@@ -195,6 +220,7 @@ export interface SiteSettings {
   homepage: HomepageSettings;
   navigation: NavigationSettings;
   pages: PagesSettings;
+  promotions: PromotionsSettings;
 }
 
 export type SettingsSection = keyof SiteSettings;
@@ -205,6 +231,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   "homepage",
   "navigation",
   "pages",
+  "promotions",
 ];
 
 const IRAQ_GOVERNORATES = [
@@ -460,6 +487,7 @@ export const defaultSettings: SiteSettings = {
       },
     ],
   },
+  promotions: { coupons: [] },
 };
 
 /** Store-owner-facing names for the sections, used by the admin panel. */
@@ -470,4 +498,5 @@ export const settingsSectionLabel: Record<SettingsSection, string> = {
   homepage: "الصفحة الرئيسية",
   navigation: "القوائم",
   pages: "الصفحات",
+  promotions: "الكوبونات",
 };

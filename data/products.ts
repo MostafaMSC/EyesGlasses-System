@@ -166,6 +166,8 @@ export interface Product {
   tryOnEnabled?: boolean;
   specs?: EyewearSpecs;
   seo?: { title?: string; description?: string };
+  /** Approved-review summary, attached by the listing API; never stored. */
+  rating?: { average: number; count: number };
   colors: ProductColor[];
   availability: Availability;
   featured?: boolean;

@@ -4,13 +4,16 @@ import { useState } from "react";
 import { AdminCard, AdminShell } from "@/components/admin/AdminShell";
 import { newId, useSettingsSection } from "@/components/admin/useSettingsSection";
 import { ImageInput, ListEditor, SaveBar, Tabs, TextArea, TextInput, Toggle } from "@/components/admin/SettingsEditors";
-import type { PaymentMethodKind } from "@/data/siteSettings";
+import type { CouponType, PaymentMethodKind } from "@/data/siteSettings";
+import { useProductStore } from "@/lib/productStore";
+import { useCategories } from "@/lib/settingsStore";
 
 const DAY_NAMES = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 const TABS = [
   { id: "store", label: "معلومات المتجر" },
   { id: "commerce", label: "التوصيل والدفع" },
   { id: "catalog", label: "التصنيفات والماركات" },
+  { id: "promotions", label: "الكوبونات" },
 ];
 
 export default function AdminSettingsPage() {
@@ -21,6 +24,7 @@ export default function AdminSettingsPage() {
       {tab === "store" && <StoreEditor />}
       {tab === "commerce" && <CommerceEditor />}
       {tab === "catalog" && <CatalogEditor />}
+      {tab === "promotions" && <PromotionsEditor />}
     </AdminShell>
   );
 }
@@ -218,6 +222,93 @@ function CatalogEditor() {
           )}
         />
       </div>
+    </>
+  );
+}
+
+function PromotionsEditor() {
+  const s = useSettingsSection("promotions");
+  const { customProducts } = useProductStore();
+  const categories = useCategories();
+  if (!s.data) return <p className="text-sm text-muted">جاري التحميل…</p>;
+  const d = s.data;
+  return (
+    <>
+      <SaveBar saving={s.saving} dirty={s.dirty} onSave={s.save} message={s.message} />
+      <ListEditor
+        title="الكوبونات"
+        items={d.coupons}
+        onChange={(coupons) => s.update({ coupons })}
+        addLabel="كوبون جديد"
+        summary={(c) => `${c.code || "كوبون"} — ${c.type === "percent" ? `${c.value}%` : c.value.toLocaleString("en-US")}${c.active ? "" : " (معطّل)"}`}
+        create={() => ({
+          id: newId("c"),
+          code: "",
+          type: "percent" as CouponType,
+          value: 10,
+          minOrderAmount: 0,
+          productIds: [],
+          categorySlugs: [],
+          expiresAt: "",
+          maxUses: 0,
+          perCustomerLimit: 0,
+          active: true,
+        })}
+        render={(c, set) => (
+          <>
+            <TextInput label="الرمز" value={c.code} onChange={(v) => set({ code: v.toUpperCase().replace(/\s+/g, "") })} dir="ltr" placeholder="RAMADAN20" />
+            <label className="block">
+              <span className="mb-1.5 block text-xs font-bold text-ink-soft">النوع</span>
+              <select value={c.type} onChange={(e) => set({ type: e.target.value as CouponType })} className="field">
+                <option value="percent">نسبة مئوية</option>
+                <option value="fixed">مبلغ ثابت</option>
+              </select>
+            </label>
+            <TextInput label={c.type === "percent" ? "النسبة %" : "المبلغ"} type="number" value={c.value} onChange={(v) => set({ value: Number(v) || 0 })} />
+            <TextInput label="الحد الأدنى للطلب (0 = بلا حد)" type="number" value={c.minOrderAmount} onChange={(v) => set({ minOrderAmount: Number(v) || 0 })} />
+            <TextInput label="ينتهي في" type="date" value={c.expiresAt} onChange={(v) => set({ expiresAt: v })} />
+            <TextInput label="أقصى عدد استخدامات (0 = بلا حد)" type="number" value={c.maxUses} onChange={(v) => set({ maxUses: Number(v) || 0 })} />
+            <TextInput label="أقصى استخدام لكل زبون (0 = بلا حد)" type="number" value={c.perCustomerLimit} onChange={(v) => set({ perCustomerLimit: Number(v) || 0 })} />
+            <div className="sm:col-span-2">
+              <span className="mb-1.5 block text-xs font-bold text-ink-soft">يقتصر على تصنيفات (اتركها فارغة لكل المنتجات)</span>
+              <div className="flex flex-wrap gap-2">
+                {categories.map((cat) => {
+                  const on = c.categorySlugs.includes(cat.slug);
+                  return (
+                    <button
+                      key={cat.slug}
+                      type="button"
+                      onClick={() => set({ categorySlugs: on ? c.categorySlugs.filter((x) => x !== cat.slug) : [...c.categorySlugs, cat.slug] })}
+                      className={`rounded-full border px-3 py-1.5 text-xs font-bold transition ${on ? "border-accent/50 bg-accent/12 text-accent" : "border-line text-ink-soft"}`}
+                    >
+                      {cat.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="sm:col-span-2">
+              <span className="mb-1.5 block text-xs font-bold text-ink-soft">يقتصر على منتجات (اتركها فارغة لكل المنتجات)</span>
+              <div className="flex flex-wrap gap-2">
+                {customProducts.map((p) => {
+                  const on = c.productIds.includes(p.id);
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => set({ productIds: on ? c.productIds.filter((x) => x !== p.id) : [...c.productIds, p.id] })}
+                      className={`rounded-full border px-3 py-1.5 text-xs font-bold transition ${on ? "border-accent/50 bg-accent/12 text-accent" : "border-line text-ink-soft"}`}
+                    >
+                      {p.brand} {p.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <Toggle label="مفعّل" checked={c.active} onChange={(v) => set({ active: v })} />
+          </>
+        )}
+      />
     </>
   );
 }
