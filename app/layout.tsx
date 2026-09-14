@@ -1,12 +1,15 @@
 import type { Metadata, Viewport } from "next";
 import { Cairo, Tajawal } from "next/font/google";
-import { storeConfig } from "@/data/storeConfig";
+import { defaultSettings } from "@/data/siteSettings";
 import { ShopUIProvider } from "@/context/ShopUIContext";
 import { ThemeProvider, themeBootstrapScript } from "@/context/ThemeContext";
 import { ProductsProvider } from "@/lib/productStore";
+import { SettingsProvider } from "@/lib/settingsStore";
+import { CartProvider } from "@/lib/cartStore";
+import { WishlistProvider } from "@/lib/wishlistStore";
 import { Header } from "@/components/layout/Header";
 import { Footer } from "@/components/layout/Footer";
-import { ProductDetailsModal } from "@/components/eyewear/ProductDetailsModal";
+import { CartDrawer } from "@/components/cart/CartDrawer";
 import { VirtualTryOnModal } from "@/components/try-on/VirtualTryOnModal";
 import "./globals.css";
 
@@ -22,11 +25,28 @@ const tajawal = Tajawal({
   variable: "--font-tajawal",
 });
 
-export const metadata: Metadata = {
-  title: `${storeConfig.storeName} | تجربة افتراضية للنظارات`,
-  description:
-    "اكتشف تشكيلة عوينات أبي ذر، جرّب النظارة على وجهك مباشرة من كاميرا موبايلك، واطلب عبر واتساب.",
-};
+// The store name, SEO text and navigation are editable in admin, so pages
+// are rendered per request rather than baked at build time — which also
+// means the Docker build needs no database.
+export const dynamic = "force-dynamic";
+
+export async function generateMetadata(): Promise<Metadata> {
+  let seo = defaultSettings.store.seo;
+  let name = defaultSettings.store.name;
+  try {
+    const { getSettingsSection } = await import("@/lib/settingsDb");
+    const { data } = await getSettingsSection("store");
+    seo = { ...seo, ...data.seo };
+    name = data.name || name;
+  } catch {
+    // No database (e.g. during the build): the defaults are fine.
+  }
+  return {
+    title: { default: seo.title || `${name} | تجربة افتراضية للنظارات`, template: `%s | ${name}` },
+    description: seo.description,
+    openGraph: seo.ogImage ? { images: [seo.ogImage] } : undefined,
+  };
+}
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -63,15 +83,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       */}
       <body className="antialiased" suppressHydrationWarning>
         <ThemeProvider>
-          <ProductsProvider>
-            <ShopUIProvider>
-              <Header />
-              <main className="min-h-screen">{children}</main>
-              <Footer />
-              <ProductDetailsModal />
-              <VirtualTryOnModal />
-            </ShopUIProvider>
-          </ProductsProvider>
+          <SettingsProvider>
+            <ProductsProvider>
+              <CartProvider>
+                <WishlistProvider>
+                  <ShopUIProvider>
+                    <Header />
+                    <main className="min-h-screen">{children}</main>
+                    <Footer />
+                    <CartDrawer />
+                    <VirtualTryOnModal />
+                  </ShopUIProvider>
+                </WishlistProvider>
+              </CartProvider>
+            </ProductsProvider>
+          </SettingsProvider>
         </ThemeProvider>
       </body>
     </html>

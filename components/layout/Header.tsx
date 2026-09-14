@@ -3,17 +3,25 @@
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { AnimatePresence, motion } from "framer-motion";
-import { storeConfig } from "@/data/storeConfig";
+import { useSettings } from "@/lib/settingsStore";
+import { useCart } from "@/lib/cartStore";
+import { useWishlist } from "@/lib/wishlistStore";
 import { Container } from "@/components/ui/Container";
 import { Button } from "@/components/ui/Button";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { DesktopNav, DesktopNavFallback, MobileNavLinks } from "@/components/layout/HeaderNav";
-import { IconMenu, IconClose, IconGlasses, IconSparkles } from "@/components/ui/Icons";
+import { SearchBox } from "@/components/layout/SearchBox";
+import { StoreLogo } from "@/components/layout/StoreLogo";
+import { IconMenu, IconClose, IconSparkles, IconSearch, IconCart, IconHeart } from "@/components/ui/Icons";
 import { cn } from "@/lib/cn";
 
 export function Header() {
   const [open, setOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const { settings } = useSettings();
+  const cart = useCart();
+  const wishlist = useWishlist();
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 12);
@@ -31,21 +39,34 @@ export function Header() {
           : "border-b border-transparent"
       )}
     >
-      <Container className={cn("flex items-center justify-between transition-all duration-300", scrolled ? "h-16" : "h-16 sm:h-20")}>
-        <Link href="/" className="group flex items-center gap-2.5">
-          <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-2 text-accent-contrast shadow-[0_8px_22px_-10px_var(--accent)] transition-transform duration-300 group-hover:-rotate-6">
-            <IconGlasses className="h-5 w-5" />
-          </span>
-          <span className="font-display text-lg font-extrabold text-ink sm:text-xl">{storeConfig.storeName}</span>
+      <Container className={cn("flex items-center justify-between gap-2 transition-all duration-300", scrolled ? "h-16" : "h-16 sm:h-20")}>
+        <Link href="/" className="group flex min-w-0 items-center gap-2.5">
+          <StoreLogo />
+          <span className="truncate font-display text-lg font-extrabold text-ink sm:text-xl">{settings.store.name}</span>
         </Link>
 
         <Suspense fallback={<DesktopNavFallback />}>
           <DesktopNav />
         </Suspense>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          <IconButton label="البحث" onClick={() => setSearchOpen(true)}>
+            <IconSearch className="h-[18px] w-[18px]" />
+          </IconButton>
+          <Link
+            href="/wishlist"
+            aria-label="المفضلة"
+            className="relative hidden h-10 w-10 items-center justify-center rounded-full border border-line bg-surface-2 text-ink-soft transition hover:border-accent/60 hover:text-accent active:scale-95 sm:flex"
+          >
+            <IconHeart className="h-[18px] w-[18px]" />
+            {wishlist.ids.length > 0 && <Count n={wishlist.ids.length} />}
+          </Link>
+          <IconButton label="السلة" onClick={() => cart.setOpen(true)}>
+            <IconCart className="h-[18px] w-[18px]" />
+            {cart.count > 0 && <Count n={cart.count} />}
+          </IconButton>
           <ThemeToggle />
-          <div className="hidden sm:block">
+          <div className="hidden lg:block">
             <Button href="/catalog" variant="primary" size="sm" icon={<IconSparkles className="h-4 w-4" />}>
               تصفح المجموعة
             </Button>
@@ -75,6 +96,20 @@ export function Header() {
               <Suspense fallback={null}>
                 <MobileNavLinks onNavigate={() => setOpen(false)} />
               </Suspense>
+              <Link
+                href="/wishlist"
+                onClick={() => setOpen(false)}
+                className="flex items-center gap-2 rounded-xl px-3.5 py-3 text-sm font-semibold text-ink-soft transition hover:bg-surface-2 hover:text-ink sm:hidden"
+              >
+                <IconHeart className="h-4 w-4" /> المفضلة {wishlist.ids.length > 0 && `(${wishlist.ids.length})`}
+              </Link>
+              <Link
+                href="/track"
+                onClick={() => setOpen(false)}
+                className="rounded-xl px-3.5 py-3 text-sm font-semibold text-ink-soft transition hover:bg-surface-2 hover:text-ink"
+              >
+                تتبع طلبك
+              </Link>
               <Button
                 href="/catalog"
                 variant="primary"
@@ -88,6 +123,29 @@ export function Header() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      <SearchBox open={searchOpen} onClose={() => setSearchOpen(false)} />
     </header>
+  );
+}
+
+function IconButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className="relative flex h-10 w-10 items-center justify-center rounded-full border border-line bg-surface-2 text-ink-soft transition hover:border-accent/60 hover:text-accent active:scale-95"
+    >
+      {children}
+    </button>
+  );
+}
+
+function Count({ n }: { n: number }) {
+  return (
+    <span className="absolute -left-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-extrabold text-accent-contrast ring-2 ring-bg">
+      {n > 99 ? "99+" : n}
+    </span>
   );
 }

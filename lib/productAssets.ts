@@ -25,7 +25,7 @@ import { FRAMES_PREFIX, normalizeModelPath, stripModelVersion } from "@/lib/mode
  * data back before the row is written, and a URL never ends up stored.
  */
 
-const KEY_PATTERN = /^(overlay|left|right|model|image-\d+)$/;
+const KEY_PATTERN = /^(overlay|left|right|model|image-\d+|gallery-\d+)$/;
 
 /** Well-formed asset key, and nothing else — this ends up in a URL. */
 export function isAssetKey(key: string): boolean {
@@ -45,6 +45,7 @@ function assetFields(product: Product): Array<[key: string, value: string | unde
     ["right", t.rightImage],
     ["model", t.model3d],
     ...(product.images ?? []).map((img, i): [string, string | undefined] => [`image-${i}`, img]),
+    ...(product.gallery ?? []).map((g, i): [string, string | undefined] => [`gallery-${i}`, g.src]),
   ];
 }
 
@@ -55,6 +56,14 @@ function setAssetField(product: Product, key: string, value: string | undefined)
     const i = Number(image[1]);
     if (value === undefined) product.images.splice(i, 1);
     else product.images[i] = value;
+    return;
+  }
+  const gallery = /^gallery-(\d+)$/.exec(key);
+  if (gallery) {
+    const i = Number(gallery[1]);
+    if (!product.gallery) return;
+    if (value === undefined) product.gallery.splice(i, 1);
+    else product.gallery[i] = { ...product.gallery[i], src: value };
     return;
   }
   const field = ({ overlay: "overlayImage", left: "leftImage", right: "rightImage", model: "model3d" } as const)[
@@ -99,7 +108,12 @@ function versionedModelPath(path: string): string {
  * picture or model replaced by its asset URL.
  */
 export function toPublicProduct(product: Product, updatedAt: Date): Product {
-  const out: Product = { ...product, images: [...(product.images ?? [])], tryOn: { ...product.tryOn } };
+  const out: Product = {
+    ...product,
+    images: [...(product.images ?? [])],
+    gallery: product.gallery?.map((g) => ({ ...g })),
+    tryOn: { ...product.tryOn },
+  };
   const version = updatedAt.getTime().toString(36);
   for (const [key, value] of assetFields(out)) {
     if (isDataUrl(value)) setAssetField(out, key, assetUrl(out.id, key, version));
@@ -117,7 +131,12 @@ export function toPublicProduct(product: Product, updatedAt: Date): Product {
  * A URL for an asset the stored row no longer has is simply removed.
  */
 export function resolveIncomingAssets(incoming: Product, stored: Product | null): Product {
-  const out: Product = { ...incoming, images: [...(incoming.images ?? [])], tryOn: { ...incoming.tryOn } };
+  const out: Product = {
+    ...incoming,
+    images: [...(incoming.images ?? [])],
+    gallery: incoming.gallery?.map((g) => ({ ...g })),
+    tryOn: { ...incoming.tryOn },
+  };
   // Walk from the end so removing an `images[i]` entry can't shift a later key.
   for (const [key, value] of assetFields(out).reverse()) {
     if (isOwnAssetUrl(out.id, key, value)) {
@@ -131,13 +150,4 @@ export function resolveIncomingAssets(incoming: Product, stored: Product | null)
   return out;
 }
 
-/** Decodes a base64 data URL into bytes and their media type. */
-export function decodeDataUrl(value: string): { contentType: string; body: Buffer } | null {
-  const match = /^data:([^;,]+)(;[^,]*)?,([\s\S]*)$/.exec(value);
-  if (!match) return null;
-  const [, contentType, params = "", payload] = match;
-  const body = params.includes(";base64")
-    ? Buffer.from(payload, "base64")
-    : Buffer.from(decodeURIComponent(payload), "utf8");
-  return { contentType, body };
-}
+export { decodeDataUrl } from "@/lib/dataUrlAssets";

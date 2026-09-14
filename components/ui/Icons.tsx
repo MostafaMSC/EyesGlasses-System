@@ -156,11 +156,93 @@ export function IconStar(props: IconProps) {
   );
 }
 
-export function IconHeart(props: IconProps) {
+export function IconHeart({ filled, ...props }: IconProps & { filled?: boolean }) {
   return (
     <Stroke {...props}>
-      <path d="M12 20.2 4.9 13.4a4.6 4.6 0 0 1 0-6.6 4.8 4.8 0 0 1 6.7 0l.4.4.4-.4a4.8 4.8 0 0 1 6.7 0 4.6 4.6 0 0 1 0 6.6Z" />
+      <path
+        d="M12 20.2 4.9 13.4a4.6 4.6 0 0 1 0-6.6 4.8 4.8 0 0 1 6.7 0l.4.4.4-.4a4.8 4.8 0 0 1 6.7 0 4.6 4.6 0 0 1 0 6.6Z"
+        fill={filled ? "currentColor" : "none"}
+      />
     </Stroke>
+  );
+}
+
+export function IconCart(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M3 4h2.2l2.1 10.6a1.6 1.6 0 0 0 1.6 1.3h8.6a1.6 1.6 0 0 0 1.6-1.2L21 8H6.4" />
+      <circle cx="9.6" cy="19.6" r="1.3" />
+      <circle cx="17.4" cy="19.6" r="1.3" />
+    </Stroke>
+  );
+}
+
+export function IconMinus(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M5 12h14" />
+    </Stroke>
+  );
+}
+
+export function IconPhone(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M5.2 3.6h3.1l1.6 4-2 1.3a11.8 11.8 0 0 0 5.2 5.2l1.3-2 4 1.6v3.1a1.6 1.6 0 0 1-1.7 1.6A15.4 15.4 0 0 1 3.6 5.3a1.6 1.6 0 0 1 1.6-1.7Z" />
+    </Stroke>
+  );
+}
+
+export function IconMail(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <rect x="3" y="5.5" width="18" height="13" rx="2.5" />
+      <path d="m3.8 7 8.2 6 8.2-6" />
+    </Stroke>
+  );
+}
+
+export function IconClock(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </Stroke>
+  );
+}
+
+export function IconPackage(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M12 3.4 20 7.5v9L12 20.6 4 16.5v-9Z" />
+      <path d="M4 7.5 12 11.6l8-4.1" />
+      <path d="M12 11.6v9" />
+    </Stroke>
+  );
+}
+
+export function IconRuler(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <rect x="2.8" y="8.2" width="18.4" height="7.6" rx="1.6" />
+      <path d="M6.6 8.2v3M10.2 8.2v2M13.8 8.2v3M17.4 8.2v2" />
+    </Stroke>
+  );
+}
+
+export function IconFacebook(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M13.6 21v-7.2h2.4l.4-2.9h-2.8V9.1c0-.8.2-1.4 1.4-1.4h1.5V5.1c-.3 0-1.1-.1-2.2-.1-2.1 0-3.6 1.3-3.6 3.7v2.2H8.3v2.9h2.4V21h2.9Z" />
+    </svg>
+  );
+}
+
+export function IconTikTok(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M16.6 3c.3 2.2 1.6 3.6 3.8 3.8v3.1c-1.4 0-2.7-.4-3.8-1.2v6.2A5.4 5.4 0 1 1 11.2 9.5c.3 0 .6 0 .9.1v3.2a2.3 2.3 0 1 0 1.6 2.2V3h2.9Z" />
+    </svg>
   );
 }
 

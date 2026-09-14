@@ -23,6 +23,19 @@ export type FrameShape =
   | "acetateSquare"
   | "metalSquare";
 
+export const frameShapeLabel: Record<FrameShape, string> = {
+  acetateSquare: "أسيتات مربع",
+  metalSquare: "معدني مربع",
+  opticalSquare: "طبي مربع",
+  wayfarer: "ويفيرر",
+  aviator: "طياري (أفياتور)",
+  round: "دائري",
+  rectangle: "مستطيل",
+  catEye: "كات آي",
+  oversized: "كبير الحجم",
+  sport: "رياضي",
+};
+
 export interface FrameStyleParams {
   color: string;
   lensColor: string;

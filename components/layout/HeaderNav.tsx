@@ -3,14 +3,22 @@
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
+import { useMemo } from "react";
 import { cn } from "@/lib/cn";
+import { useSettings } from "@/lib/settingsStore";
 
-export const navLinks = [
-  { href: "/", label: "الرئيسية" },
-  { href: "/catalog", label: "التشكيلة" },
-  { href: "/catalog?category=sunglasses", label: "النظارات الشمسية" },
-  { href: "/catalog?category=optical", label: "النظارات الطبية" },
-];
+/** Header links as the admin configured them, visible ones in order. */
+export function useNavLinks() {
+  const { settings } = useSettings();
+  return useMemo(
+    () =>
+      settings.navigation.header
+        .filter((l) => l.visible)
+        .sort((a, b) => a.order - b.order)
+        .map((l) => ({ href: l.href, label: l.label })),
+    [settings.navigation.header]
+  );
+}
 
 /**
  * Split out of Header because `useSearchParams` forces its subtree to be
@@ -19,6 +27,7 @@ export const navLinks = [
  */
 export function DesktopNav() {
   const active = useActiveHref();
+  const navLinks = useNavLinks();
 
   return (
     <nav className="hidden items-center gap-1 lg:flex">
@@ -49,6 +58,7 @@ export function DesktopNav() {
 }
 
 export function DesktopNavFallback() {
+  const navLinks = useNavLinks();
   return (
     <nav className="hidden items-center gap-1 lg:flex">
       {navLinks.map((link) => (
@@ -66,6 +76,7 @@ export function DesktopNavFallback() {
 
 export function MobileNavLinks({ onNavigate }: { onNavigate: () => void }) {
   const active = useActiveHref();
+  const navLinks = useNavLinks();
 
   return (
     <>

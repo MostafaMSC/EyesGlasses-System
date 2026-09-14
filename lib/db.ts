@@ -63,6 +63,9 @@ let schemaReady: Promise<void> | null = null;
 
 export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
+    // Same document-per-row pattern for everything. The columns beside
+    // `data` are the ones queries filter or sort on; the rest lives in JSON
+    // so a new field never needs a migration.
     schemaReady = pool()
       .query(
         `CREATE TABLE IF NOT EXISTS products (
@@ -70,7 +73,34 @@ export function ensureSchema(): Promise<void> {
            data        jsonb NOT NULL,
            created_at  timestamptz NOT NULL DEFAULT now(),
            updated_at  timestamptz NOT NULL DEFAULT now()
-         )`
+         );
+         CREATE TABLE IF NOT EXISTS settings (
+           key         text PRIMARY KEY,
+           data        jsonb NOT NULL,
+           updated_at  timestamptz NOT NULL DEFAULT now()
+         );
+         CREATE TABLE IF NOT EXISTS orders (
+           id          text PRIMARY KEY,
+           number      text UNIQUE NOT NULL,
+           status      text NOT NULL,
+           phone       text NOT NULL,
+           data        jsonb NOT NULL,
+           created_at  timestamptz NOT NULL DEFAULT now(),
+           updated_at  timestamptz NOT NULL DEFAULT now()
+         );
+         CREATE INDEX IF NOT EXISTS orders_status_idx ON orders (status);
+         CREATE INDEX IF NOT EXISTS orders_phone_idx ON orders (phone);
+         CREATE INDEX IF NOT EXISTS orders_created_idx ON orders (created_at DESC);
+         CREATE SEQUENCE IF NOT EXISTS order_number_seq;
+         CREATE TABLE IF NOT EXISTS events (
+           id          bigserial PRIMARY KEY,
+           type        text NOT NULL,
+           product_id  text,
+           data        jsonb,
+           created_at  timestamptz NOT NULL DEFAULT now()
+         );
+         CREATE INDEX IF NOT EXISTS events_type_product_idx ON events (type, product_id);
+         CREATE INDEX IF NOT EXISTS events_created_idx ON events (created_at DESC);`
       )
       .then(() => undefined);
     // Let the next request try again rather than caching the failure forever.
@@ -100,6 +130,16 @@ export async function listProducts(): Promise<ProductRow[]> {
     "SELECT data, updated_at FROM products ORDER BY created_at ASC"
   );
   return rows.map((r) => ({ data: r.data, updatedAt: r.updated_at }));
+}
+
+export async function getProductBySlug(slug: string): Promise<ProductRow | null> {
+  await ensureSchema();
+  const { rows } = await pool().query<{ data: Product; updated_at: Date }>(
+    "SELECT data, updated_at FROM products WHERE data->>'slug' = $1 ORDER BY created_at ASC LIMIT 1",
+    [slug]
+  );
+  const row = rows[0];
+  return row ? { data: row.data, updatedAt: row.updated_at } : null;
 }
 
 export async function getProduct(id: string): Promise<ProductRow | null> {

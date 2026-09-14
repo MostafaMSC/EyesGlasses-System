@@ -1,8 +1,50 @@
 import type { FrameShape } from "@/lib/frameShapes";
 import { frameSvgDataUri } from "@/lib/frameShapes";
 
-export type Category = "sunglasses" | "optical";
+/**
+ * Category slug. The two built-in ones are `sunglasses` and `optical`; the
+ * admin can add more (see `data/siteSettings.ts` → `categories`), so this is
+ * a string rather than a closed union.
+ */
+export type Category = string;
 export type Availability = "in_stock" | "low_stock" | "preorder";
+export type Gender = "men" | "women" | "unisex" | "kids";
+export type FrameSize = "narrow" | "medium" | "wide";
+export type FrameMaterial = "acetate" | "metal" | "titanium" | "tr90" | "mixed" | "other";
+
+/** One picture in a product's gallery, by what it shows. */
+export type GalleryKind = "front" | "left" | "right" | "lifestyle" | "detail";
+export interface GalleryImage {
+  kind: GalleryKind;
+  /** A data URL when stored; an `/api/products/{id}/asset/gallery-N` URL when served. */
+  src: string;
+}
+
+/** Physical frame measurements, in millimetres (weight in grams). */
+export interface FrameDimensions {
+  lensWidth?: number;
+  bridgeWidth?: number;
+  templeLength?: number;
+  frameWidth?: number;
+  lensHeight?: number;
+  weight?: number;
+}
+
+/**
+ * Eyewear attributes the catalogue filters on. All optional: a product added
+ * before these existed simply doesn't match those filters.
+ */
+export interface EyewearSpecs {
+  material?: FrameMaterial;
+  gender?: Gender;
+  size?: FrameSize;
+  /** Human-readable frame colour name, e.g. "أسود لامع". */
+  colorName?: string;
+  dimensions?: FrameDimensions;
+  uvProtection?: boolean;
+  prescriptionCompatible?: boolean;
+  lensCompatibility?: string;
+}
 
 export interface ProductColor {
   name: string;
@@ -102,11 +144,28 @@ export interface Product {
   brand: string;
   name: string;
   category: Category;
+  /** Current selling price. When `compareAtPrice` is higher, this is the sale price. */
   price: number;
+  /** The pre-discount price, shown struck through. */
   compareAtPrice?: number;
-  /** Demo images are generated on the fly from `tryOn` — replace with real photo URLs later. */
+  /** Plain URLs. Superseded by `gallery`; kept so older rows still read. */
   images: string[];
+  /** Product photos by view. `gallery[0]` is the card picture when present. */
+  gallery?: GalleryImage[];
   description: string;
+  /** One line for cards and search results. */
+  shortDescription?: string;
+  sku?: string;
+  /** Units on hand. `undefined` means stock isn't tracked for this product. */
+  stock?: number;
+  /** Below this many units the admin's inventory view flags it. */
+  lowStockThreshold?: number;
+  /** Hidden from the storefront (still editable in admin) when false. */
+  active?: boolean;
+  /** Whether the try-on button is offered. Defaults to true. */
+  tryOnEnabled?: boolean;
+  specs?: EyewearSpecs;
+  seo?: { title?: string; description?: string };
   colors: ProductColor[];
   availability: Availability;
   featured?: boolean;
@@ -115,6 +174,52 @@ export interface Product {
   createdAt: string;
   tryOn: TryOnConfig;
 }
+
+/** Sale discount as a whole percentage, or 0 when the product isn't on sale. */
+export function discountPercent(product: Pick<Product, "price" | "compareAtPrice">): number {
+  if (!product.compareAtPrice || product.compareAtPrice <= product.price) return 0;
+  return Math.round((1 - product.price / product.compareAtPrice) * 100);
+}
+
+/** Whether the storefront shows the product at all. Older rows have no flag and are shown. */
+export function isActive(product: Pick<Product, "active">): boolean {
+  return product.active !== false;
+}
+
+/** Whether the try-on can be offered for it. */
+export function canTryOn(product: Pick<Product, "tryOnEnabled">): boolean {
+  return product.tryOnEnabled !== false;
+}
+
+export const genderLabel: Record<Gender, string> = {
+  men: "رجالي",
+  women: "نسائي",
+  unisex: "للجنسين",
+  kids: "أطفال",
+};
+
+export const sizeLabel: Record<FrameSize, string> = {
+  narrow: "ضيق",
+  medium: "متوسط",
+  wide: "عريض",
+};
+
+export const materialLabel: Record<FrameMaterial, string> = {
+  acetate: "أسيتات",
+  metal: "معدن",
+  titanium: "تيتانيوم",
+  tr90: "TR90",
+  mixed: "مختلط",
+  other: "أخرى",
+};
+
+export const galleryKindLabel: Record<GalleryKind, string> = {
+  front: "أمامية",
+  left: "الجانب الأيسر",
+  right: "الجانب الأيمن",
+  lifestyle: "على الوجه",
+  detail: "تفاصيل",
+};
 
 /**
  * The demo catalogue (fictional listings under real luxury brand names) has
@@ -128,8 +233,10 @@ export const products: Product[] = [];
 
 export const brands = Array.from(new Set(products.map((p) => p.brand)));
 
-export function getProductVisualSrc(product: Pick<Product, "tryOn" | "images">): string {
-  if (product.images[0]) return product.images[0];
+export function getProductVisualSrc(product: Pick<Product, "tryOn" | "images" | "gallery">): string {
+  const front = product.gallery?.find((g) => g.kind === "front") ?? product.gallery?.[0];
+  if (front) return front.src;
+  if (product.images?.[0]) return product.images[0];
   if (product.tryOn.overlayImage) return product.tryOn.overlayImage;
   return frameSvgDataUri(product.tryOn.frameShape, {
     color: product.tryOn.color,

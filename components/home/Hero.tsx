@@ -2,23 +2,23 @@
 
 import { useRef } from "react";
 import { motion, useMotionValue, useSpring, useTransform } from "framer-motion";
-import { getProductVisualSrc } from "@/data/products";
+import { canTryOn, getProductVisualSrc, isActive } from "@/data/products";
 import { useProductStore } from "@/lib/productStore";
+import { useSettings } from "@/lib/settingsStore";
 import { useShopUI } from "@/context/ShopUIContext";
 import { Button } from "@/components/ui/Button";
 import { IconCamera, IconGlasses, IconSparkles, IconShieldCheck, IconTruck } from "@/components/ui/Icons";
 
-const stats = [
-  { value: "+٥٠٠", label: "عميل جرّب المجموعة" },
-  { value: "٢٤ س", label: "رد على واتساب" },
-  { value: "٣D", label: "تجربة على الوجه" },
-];
-
 export function Hero() {
   const { openTryOn } = useShopUI();
-  const { products } = useProductStore();
-  const heroProduct = products[0];
-  const secondaryProduct = products[1] ?? products[0];
+  const { products: all } = useProductStore();
+  const { settings } = useSettings();
+  const hero = settings.homepage.hero;
+  const stats = settings.homepage.stats;
+  const products = all.filter(isActive);
+  // The frame the hero's try-on button opens: the first one that can be tried on.
+  const heroProduct = products.find(canTryOn) ?? products[0];
+  const secondaryProduct = products.find((p) => p !== heroProduct) ?? heroProduct;
   const stageRef = useRef<HTMLDivElement>(null);
 
   // Pointer-driven tilt on the frame stage. Springs keep it from snapping.
@@ -65,33 +65,39 @@ export function Hero() {
               <span className="animate-pulse-ring absolute inline-flex h-full w-full rounded-full bg-accent" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
             </span>
-            <IconCamera className="h-3.5 w-3.5" /> تجربة افتراضية بالكاميرا
+            <IconCamera className="h-3.5 w-3.5" /> {hero.badge}
           </span>
 
           <h1 className="mt-6 font-display text-[2rem] font-extrabold leading-[1.22] text-ink sm:text-4xl lg:text-[3.25rem]">
-            اختار نظارتك...
-            <br />
-            و<span className="text-gradient">جربها</span> قبل ما تشتريها
+            {hero.title}
+            {hero.highlight && (
+              <>
+                <br />
+                و<span className="text-gradient">{hero.highlight}</span> قبل ما تشتريها
+              </>
+            )}
           </h1>
 
-          <p className="mt-5 max-w-lg text-base leading-8 text-ink-soft sm:text-lg">
-            اكتشف تشكيلتنا من النظارات وجرب الإطار على وجهك مباشرة من كاميرا موبايلك — بدون تطبيق،
-            وبدون ما تطلع من البيت.
-          </p>
+          <p className="mt-5 max-w-lg text-base leading-8 text-ink-soft sm:text-lg">{hero.subtitle}</p>
 
           <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-            {heroProduct && (
+            {heroProduct && canTryOn(heroProduct) && (
               <Button
                 variant="primary"
                 size="lg"
                 icon={<IconGlasses className="h-5 w-5" />}
                 onClick={() => openTryOn(heroProduct.id)}
               >
-                جرّب النظارة الآن
+                {hero.ctaText}
               </Button>
             )}
-            <Button variant="secondary" size="lg" href="/catalog" icon={<IconSparkles className="h-5 w-5" />}>
-              تصفح المجموعة
+            <Button
+              variant="secondary"
+              size="lg"
+              href={hero.secondaryCtaLink || "/catalog"}
+              icon={<IconSparkles className="h-5 w-5" />}
+            >
+              {hero.secondaryCtaText}
             </Button>
           </div>
 
@@ -130,7 +136,13 @@ export function Hero() {
               <div className="aurora -bottom-12 -left-6 h-48 w-48 bg-accent-3/45" />
             </div>
 
-            {heroProduct && (
+            {hero.image ? (
+              // A picture the owner uploaded replaces the floating frames.
+              <div className="absolute inset-0 overflow-hidden rounded-[40px]" style={{ transform: "translateZ(40px)" }}>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={hero.image} alt="" className="h-full w-full object-cover" />
+              </div>
+            ) : heroProduct ? (
               <div className="animate-float absolute inset-x-[13%] top-[15%] aspect-[5/3]" style={{ transform: "translateZ(60px)" }}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
@@ -139,9 +151,9 @@ export function Hero() {
                   className="h-full w-full object-contain drop-shadow-[0_24px_30px_rgba(0,0,0,0.5)]"
                 />
               </div>
-            )}
+            ) : null}
 
-            {products[1] && (
+            {!hero.image && secondaryProduct && secondaryProduct !== heroProduct && (
               <div
                 className="animate-float absolute inset-x-[22%] bottom-[15%] aspect-[5/3] opacity-90"
                 style={{ animationDelay: "1.2s", transform: "translateZ(30px)" }}
@@ -155,7 +167,7 @@ export function Hero() {
               </div>
             )}
 
-            {heroProduct && (
+            {heroProduct && canTryOn(heroProduct) && (
               <button
                 onClick={() => openTryOn(heroProduct.id)}
                 className="glass shine group absolute bottom-4 left-4 flex items-center gap-2 overflow-hidden rounded-full px-4 py-3 text-xs font-bold text-ink transition hover:border-accent/50 active:scale-95"
@@ -182,7 +194,7 @@ export function Hero() {
               className="glass absolute bottom-[38%] right-2 flex items-center gap-1.5 rounded-full px-3 py-2 text-[11px] font-bold text-ink-soft sm:right-[-6%]"
               style={{ transform: "translateZ(70px)" }}
             >
-              <IconTruck className="h-3.5 w-3.5 text-accent" /> توصيل للعراق
+              <IconTruck className="h-3.5 w-3.5 text-accent" /> {settings.store.deliveryText}
             </span>
           </motion.div>
         </motion.div>

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import type { Product } from "@/data/products";
-import { storeConfig } from "@/data/storeConfig";
+import { runtimeConfig } from "@/lib/runtimeConfig";
 import { Button } from "@/components/ui/Button";
 import { IconShare, IconDownload, IconWhatsApp, IconGlasses } from "@/components/ui/Icons";
 
@@ -24,13 +24,13 @@ export function CapturePreview({
     try {
       const res = await fetch(imageDataUrl);
       const blob = await res.blob();
-      const file = new File([blob], `${storeConfig.storeNameEn}-${product.slug}.png`, { type: "image/png" });
+      const file = new File([blob], `${product.slug}.png`, { type: "image/png" });
 
       if (navigator.share && navigator.canShare?.({ files: [file] })) {
         await navigator.share({
           files: [file],
-          title: storeConfig.storeName,
-          text: `${product.brand} ${product.name} — ${storeConfig.storeName}`,
+          title: runtimeConfig.storeName,
+          text: `${product.brand} ${product.name} — ${runtimeConfig.storeName}`,
         });
         setShareState("shared");
         return;
@@ -41,7 +41,7 @@ export function CapturePreview({
 
     const link = document.createElement("a");
     link.href = imageDataUrl;
-    link.download = `${storeConfig.storeNameEn}-${product.slug}.png`;
+    link.download = `${product.slug}.png`;
     document.body.appendChild(link);
     link.click();
     link.remove();
