@@ -20,7 +20,11 @@ const globalForDb = globalThis as unknown as { productPool?: Pool };
 function createPool(): Pool {
   // The admin panel stores photos as data URLs, so a single row can be a few
   // hundred KB; a small pool is plenty and keeps memory predictable.
-  const shared = { max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 };
+  // POSTGRES_POOL_MAX exists for a development database that only accepts
+  // one connection at a time (an embedded/wire-proxied Postgres); a second
+  // connection there is reset mid-query rather than queued.
+  const max = Math.max(1, Number(process.env.POSTGRES_POOL_MAX) || 5);
+  const shared = { max, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 };
 
   // A single DATABASE_URL wins when given, for a managed/external database.
   if (process.env.DATABASE_URL) {

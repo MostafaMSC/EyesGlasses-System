@@ -453,17 +453,38 @@ checked across yaw without a camera.
   with `KHR_mesh_quantization`); textures may be PNG/JPEG or **WebP**. That is
   what `prepare-model` produces, and it is why a served model is a few hundred
   KB rather than several MB. Draco and KTX2/Basis are *not* supported.
-- **Lenses: hidden by default.** AI generators produce solid, opaque lenses
-  baked into the same mesh and material as the frame, which hides the
-  customer's eyes — the opposite of what a try-on is for. The admin panel's
-  **إخفاء العدسات** toggle (on by default for a new model) strips the lens
-  surfaces at load time, leaving the rims open; turn it off for sunglasses.
-  Detection is geometric (`lib/threeTryOn/lensGeometry.ts`): a face is lens if
-  it sits inside one of the two lens openings, faces the viewer or away, and
-  lies at lens depth rather than out on the rim's front. The region is set
-  just inside a typical lens so the rim can never be taken. It has been
-  checked on a browline acetate and a thin half-rim metal frame; a very
-  unusual shape may leave a sliver or need the model edited in Blender.
+- **Lenses: always replaced.** AI generators produce a solid, opaque lens
+  baked into the same mesh and material as the frame (every Hyper3D export
+  in this project is one node, one mesh, one material), which hides the
+  customer's eyes — the opposite of what a try-on is for. The generator's
+  lens is always taken out; the admin panel's **معالجة العدسات** section
+  decides what replaces it, stored as `tryOn.lens` (`data/products.ts`,
+  `LensConfiguration`):
+  - **اللون الأصلي** (default) — a light transparent lens in the real
+    product's lens colour. The colour is read from the product photo (the
+    one given to Hyper3D — drop it into the section, it is kept as the
+    product's front photo) by `lib/lensColorDetection.ts`: it finds the front
+    of the frame, grows one region per lens that stops at the rim, shrinks it
+    inward, discards highlights and rim-coloured pixels, and takes a median.
+    Without a photo the same detector runs on a render of the model, which
+    is only ever offered as a hint (the generator's lens colour is the thing
+    in doubt) — below the trust threshold the colour has to be picked by hand.
+  - **شفافة** — near-invisible, just enough surface to catch a highlight.
+  - **بدون عدسة** — open rims (what the old **إخفاء العدسات** toggle did;
+    rows saved with it still resolve, see `resolveLensConfig`).
+
+  Geometry (`lib/threeTryOn/lensGeometry.ts`): a face is lens if it sits
+  inside one of the two lens openings, faces the viewer or away, and lies at
+  lens depth rather than out on the rim's front. The region is set just
+  inside a typical lens so the rim can never be taken. The classification is
+  scored (symmetry, how much of the opening it fills, flatness) and applied
+  only when confident; otherwise the model is shown as exported and the
+  panel says why. For the tinted and clear modes the lens's own *front*
+  surface is rebuilt as a separate mesh with a plain transparent material —
+  the generator's exact lens shape, not a generic disc. All of this runs
+  once per model at load, in a few milliseconds, and is cached; nothing
+  happens per camera frame. The served `.glb` is never modified. The three
+  modes can be compared on every model in `/try-on-debug` ("lens (3D)").
 
 ### Where the model file lives
 

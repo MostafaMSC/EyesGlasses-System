@@ -1,8 +1,8 @@
 import { Box3, Group, Mesh, Object3D, Vector3 } from "three";
 import { gltfLoader } from "@/lib/threeTryOn/gltfLoader";
 import { buildProceduralFrame } from "@/lib/threeTryOn/proceduralFrame";
-import { stripLenses } from "@/lib/threeTryOn/lensGeometry";
-import type { TryOnConfig } from "@/data/products";
+import { applyLensConfig, type LensProcessingResult } from "@/lib/threeTryOn/lensGeometry";
+import { resolveLensConfig, type LensConfiguration, type TryOnConfig } from "@/data/products";
 
 /**
  * A glasses model ready to be placed on a face. Its root is already shifted so
@@ -17,6 +17,8 @@ export interface GlassesModel {
   /** Bounding-box extents, in the model's own units. */
   width: number;
   height: number;
+  /** What the lens pass found and did. Absent for the procedural placeholder. */
+  lens?: LensProcessingResult;
   dispose(): void;
 }
 
@@ -126,8 +128,15 @@ export function buildFallbackModel(tryOn: TryOnConfig): GlassesModel {
 const modelCache = new Map<string, Promise<GlassesModel>>();
 
 export interface LoadOptions {
-  /** See `TryOnConfig.hideLenses`. */
-  hideLenses?: boolean;
+  /** How the model's baked-in lens is handled. Omitted: the model is shown as exported. */
+  lens?: LensConfiguration;
+  /** Apply the lens pass even when the classification isn't confident. */
+  forceLens?: boolean;
+}
+
+/** The load options a product's try-on settings call for. */
+export function lensLoadOptions(tryOn: Pick<TryOnConfig, "lens" | "hideLenses" | "lensColor" | "lensOpacity">): LoadOptions {
+  return { lens: resolveLensConfig(tryOn) };
 }
 
 async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesModel> {
@@ -140,25 +149,28 @@ async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesMo
     throw new Error("The 3D model has no measurable geometry.");
   }
 
-  // Before anchoring: the lens surfaces are found relative to the model's
-  // own bounding box, which anchoring shifts.
-  if (options.hideLenses) stripLenses(scene);
-
   // Convention for an uploaded GLB: modelled facing +Z with the temple arms
   // running back along -Z, so its front face (max Z) is the lens plane.
   // Horizontally the frame is symmetric, so the box's centre is the bridge;
   // vertically the lens line has to be measured, not assumed.
-  const centre = box.getCenter(new Vector3());
-  const root = anchorAtOrigin(
-    scene,
-    new Vector3(centre.x, measureLensHeight(scene, box, size), box.max.z)
-  );
+  //
+  // Measured before the lens pass, so what the pass adds or removes can never
+  // move the anchor: a model sits on the face identically in every lens mode.
+  const anchor = new Vector3(box.getCenter(new Vector3()).x, measureLensHeight(scene, box, size), box.max.z);
+
+  // Before anchoring: the lens surfaces are found relative to the model's
+  // own bounding box, which anchoring shifts. Once per load, never per frame
+  // — the result is cached with the model.
+  const lens = options.lens ? applyLensConfig(scene, options.lens, { force: options.forceLens }) : undefined;
+
+  const root = anchorAtOrigin(scene, anchor);
 
   return {
     root,
     lensSpan: size.x * GLB_LENS_SPAN_FRACTION,
     width: size.x,
     height: size.y,
+    lens,
     dispose: () => disposeTree(root),
   };
 }
@@ -187,9 +199,16 @@ export function loadGlassesModel(url: string, options: LoadOptions = {}): Promis
   return pending;
 }
 
-/** Stripping lenses edits the geometry, so each variant is its own entry. */
+/**
+ * The lens pass edits the geometry, so each distinct lens setting is its own
+ * entry — keyed only on what changes the result, so two products sharing a
+ * model and a setting share one parsed copy.
+ */
 function cacheKey(url: string, options: LoadOptions): string {
-  return `${url}#lenses=${options.hideLenses ? "hidden" : "shown"}`;
+  const lens = options.lens;
+  if (!lens) return `${url}#lens=raw`;
+  const tint = lens.mode === "original" ? `:${lens.color ?? ""}:${lens.tintStrength ?? ""}` : "";
+  return `${url}#lens=${lens.mode}${tint}${options.forceLens ? ":force" : ""}`;
 }
 
 /** Keys whose load has finished — the models that can be shown with no wait. */

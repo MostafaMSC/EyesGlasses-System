@@ -5,8 +5,10 @@ import type { Product } from "@/data/products";
 import {
   buildFallbackModel,
   isGlassesModelReady,
+  lensLoadOptions,
   loadGlassesModel,
   type GlassesModel,
+  type LoadOptions,
 } from "@/lib/threeTryOn/glassesModel";
 import { TryOnScene, type FaceFrameInput } from "@/lib/threeTryOn/tryOnScene";
 
@@ -38,8 +40,13 @@ export interface GlassesOverlay3DHandle {
 
 export const GlassesOverlay3D = forwardRef<
   GlassesOverlay3DHandle,
-  { product: Product; rect: OverlayRect | null }
->(function GlassesOverlay3D({ product, rect }, ref) {
+  {
+    product: Product;
+    rect: OverlayRect | null;
+    /** Overrides the product's own lens handling — for the debug harness. */
+    loadOptions?: LoadOptions;
+  }
+>(function GlassesOverlay3D({ product, rect, loadOptions: loadOptionsOverride }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<TryOnScene | null>(null);
   /** Models we built ourselves and must dispose; cached GLBs are shared. */
@@ -66,12 +73,12 @@ export const GlassesOverlay3D = forwardRef<
   }, []);
 
   const modelSource = product.tryOn.model3d;
-  const hideLenses = Boolean(product.tryOn.hideLenses);
 
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
     let cancelled = false;
+    const loadOptions = loadOptionsOverride ?? lensLoadOptions(product.tryOn);
 
     const install = (model: GlassesModel, owned: boolean) => {
       if (cancelled) {
@@ -92,10 +99,10 @@ export const GlassesOverlay3D = forwardRef<
     // faster than a spinner is worth.
     let hintTimer: ReturnType<typeof setTimeout> | null = null;
     if (modelSource) {
-      if (!isGlassesModelReady(modelSource, { hideLenses })) {
+      if (!isGlassesModelReady(modelSource, loadOptions)) {
         hintTimer = setTimeout(() => setModelLoading(true), LOADING_HINT_DELAY_MS);
       }
-      loadGlassesModel(modelSource, { hideLenses })
+      loadGlassesModel(modelSource, loadOptions)
         .then((model) => install(model, false))
         .catch((err) => {
           console.error("[try-on] Could not load the 3D frame model", err);
@@ -118,7 +125,7 @@ export const GlassesOverlay3D = forwardRef<
       if (hintTimer) clearTimeout(hintTimer);
       setModelLoading(false);
     };
-  }, [modelSource, hideLenses, product.tryOn]);
+  }, [modelSource, product.tryOn, loadOptionsOverride]);
 
   useEffect(() => {
     if (!rect) return;

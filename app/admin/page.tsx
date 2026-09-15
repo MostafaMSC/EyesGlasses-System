@@ -2,8 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { frameSvgDataUri, type FrameShape } from "@/lib/frameShapes";
-import { getProductVisualSrc, type Availability, type Product } from "@/data/products";
+import {
+  getProductVisualSrc,
+  resolveLensConfig,
+  type Availability,
+  type LensConfiguration,
+  type Product,
+} from "@/data/products";
 import { AdminShell } from "@/components/admin/AdminShell";
+import { LensProcessingPanel } from "@/components/admin/LensProcessingPanel";
 import {
   commerceToProduct,
   EMPTY_COMMERCE,
@@ -90,7 +97,7 @@ interface FormState {
   rightAnchorY: number;
   rightAspect: number;
   model3d: string;
-  hideLenses: boolean;
+  lens: LensConfiguration;
 }
 
 const EMPTY: FormState = {
@@ -127,10 +134,10 @@ const EMPTY: FormState = {
   rightAnchorY: 0.5,
   rightAspect: 500 / 380,
   model3d: "",
-  // Generated models ship with opaque lenses that hide the eyes, which
-  // defeats a try-on — so a new product starts with them stripped. Sunglasses
-  // can turn this off.
-  hideLenses: true,
+  // Generated models ship with an opaque lens that hides the eyes; it is
+  // always replaced, by default with a light lens in the product's real
+  // colour, which the panel reads from the product photo.
+  lens: { mode: "original" },
 };
 
 export default function AdminPage() {
@@ -243,7 +250,7 @@ export default function AdminPage() {
             rightImageGeometry: { aspect: form.rightAspect, anchorX: form.rightAnchorX, anchorY: form.rightAnchorY },
           }
         : {}),
-      ...(form.model3d ? { model3d: form.model3d, hideLenses: form.hideLenses } : {}),
+      ...(form.model3d ? { model3d: form.model3d, lens: form.lens } : {}),
     },
   });
 
@@ -414,7 +421,7 @@ export default function AdminPage() {
       // Without the cache-buster the listing adds: that is a delivery
       // detail, and the path is what gets edited and stored.
       model3d: stripModelVersion(t.model3d ?? ""),
-      hideLenses: t.hideLenses ?? EMPTY.hideLenses,
+      lens: resolveLensConfig(t),
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -741,8 +748,22 @@ export default function AdminPage() {
             <Model3dField
               value={form.model3d}
               onChange={(v) => set("model3d", v)}
-              hideLenses={form.hideLenses}
-              onHideLensesChange={(v) => set("hideLenses", v)}
+              lens={form.lens}
+              onLensChange={(v) => set("lens", v)}
+              sourcePhoto={
+                (form.commerce.gallery.find((g) => g.kind === "front") ?? form.commerce.gallery[0])?.src ?? null
+              }
+              onSourcePhoto={(src) =>
+                // Kept as the product's front photo: it is a real picture of
+                // the product, and reprocessing later needs it again.
+                setForm((f) => ({
+                  ...f,
+                  commerce: {
+                    ...f.commerce,
+                    gallery: [{ kind: "front" as const, src }, ...f.commerce.gallery.filter((g) => g.kind !== "front")].slice(0, 8),
+                  },
+                }))
+              }
               onError={(text) => setMessage({ kind: "error", text })}
               currentImage={form.overlayImage}
               onThumbnail={({ dataUrl, geometry }) =>
@@ -1290,8 +1311,10 @@ function Model3dField({
   onError,
   currentImage,
   onThumbnail,
-  hideLenses,
-  onHideLensesChange,
+  lens,
+  onLensChange,
+  sourcePhoto,
+  onSourcePhoto,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -1299,8 +1322,10 @@ function Model3dField({
   /** The product's current picture, so a real photo is never overwritten. */
   currentImage: string;
   onThumbnail: (result: import("@/lib/threeTryOn/renderModelThumbnail").ModelThumbnail) => void;
-  hideLenses: boolean;
-  onHideLensesChange: (value: boolean) => void;
+  lens: LensConfiguration;
+  onLensChange: (value: LensConfiguration) => void;
+  sourcePhoto: string | null;
+  onSourcePhoto: (dataUrl: string) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [reading, setReading] = useState(false);
@@ -1364,12 +1389,20 @@ function Model3dField({
   const [lastGenerated, setLastGenerated] = useState<string | null>(null);
   const imageIsOurs = !currentImage || currentImage === lastGenerated;
 
+  // Only the parts of the lens setting that change the picture, so retyping
+  // a detection result that draws the same thing doesn't re-render it.
+  const lensKey = `${lens.mode}|${lens.mode === "original" ? `${lens.color ?? ""}|${lens.tintStrength ?? ""}` : ""}`;
+  const lensRef = useRef(lens);
+  useEffect(() => {
+    lensRef.current = lens;
+  }, [lens]);
+
   const makeThumbnail = useCallback(async () => {
     if (!value) return;
     setRendering(true);
     try {
       const { renderModelThumbnail } = await import("@/lib/threeTryOn/renderModelThumbnail");
-      const result = await renderModelThumbnail(value, { hideLenses });
+      const result = await renderModelThumbnail(value, { lens: lensRef.current });
       setLastGenerated(result.dataUrl);
       onThumbnail(result);
     } catch (err) {
@@ -1377,17 +1410,22 @@ function Model3dField({
     } finally {
       setRendering(false);
     }
-  }, [value, hideLenses, onThumbnail, onError]);
+  }, [value, onThumbnail, onError]);
 
-  // Generate it automatically when a model resolves or the lens toggle
-  // changes — but never over an uploaded photo, which beats any render.
+  // Generate it automatically when a model resolves or the lens setting
+  // changes — but never over an uploaded photo, which beats any render. A
+  // beat behind the colour controls, so dragging the tint slider doesn't
+  // queue a render per tick.
   const autoRenderedFor = useRef<string | null>(null);
   useEffect(() => {
-    const key = `${value}|${hideLenses}`;
+    const key = `${value}|${lensKey}`;
     if (pathCheck !== "ok" || !imageIsOurs || autoRenderedFor.current === key) return;
-    autoRenderedFor.current = key;
-    void makeThumbnail();
-  }, [pathCheck, imageIsOurs, value, hideLenses, makeThumbnail]);
+    const timer = setTimeout(() => {
+      autoRenderedFor.current = key;
+      void makeThumbnail();
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [pathCheck, imageIsOurs, value, lensKey, makeThumbnail]);
 
   const handleFile = async (file: File) => {
     if (file.size > MAX_MODEL_BYTES) {
@@ -1518,23 +1556,15 @@ function Model3dField({
         </p>
       )}
 
-      {value && (
-        <label className="mt-3 flex items-start gap-2.5 rounded-xl border border-line bg-surface-2 p-3">
-          <input
-            type="checkbox"
-            checked={hideLenses}
-            onChange={(e) => onHideLensesChange(e.target.checked)}
-            className="mt-0.5"
-          />
-          <span className="text-xs leading-5">
-            <span className="block font-bold text-ink">إخفاء العدسات في التجربة</span>
-            <span className="text-muted">
-              المجسمات المولَّدة تأتي بعدسات معتمة تخفي عين العميل. عند التفعيل تُزال العدسات
-              ويبقى الإطار مفتوحاً فتظهر العين. عطّله للنظارات الشمسية حيث اللون هو المقصود.
-            </span>
-          </span>
-        </label>
-      )}
+      <LensProcessingPanel
+        modelUrl={value}
+        modelReady={isEmbedded || pathCheck === "ok"}
+        lens={lens}
+        onLensChange={onLensChange}
+        sourcePhoto={sourcePhoto}
+        onSourcePhoto={onSourcePhoto}
+        onError={onError}
+      />
 
       {reading && (
         <p className="mt-2 flex items-center gap-1.5 text-[11px] font-bold text-accent">

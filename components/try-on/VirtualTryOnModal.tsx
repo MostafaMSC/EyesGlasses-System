@@ -203,9 +203,6 @@ export function VirtualTryOnModal() {
   // change of selection; only while 3D is showing, since 2D needs no model.
   useEffect(() => {
     if (!isOpen || !is3d || !product) return;
-    const models = products.map((p) =>
-      p.tryOn.model3d ? { url: p.tryOn.model3d, options: { hideLenses: Boolean(p.tryOn.hideLenses) } } : null
-    );
     const index = products.findIndex((p) => p.id === product.id);
     let cancelled = false;
     let cancel: (() => void) | null = null;
@@ -214,6 +211,9 @@ export function VirtualTryOnModal() {
     // already started by now, so this resolves from the same chunk.
     import("@/lib/threeTryOn/glassesModel").then((m) => {
       if (cancelled) return;
+      const models = products.map((p) =>
+        p.tryOn.model3d ? { url: p.tryOn.model3d, options: m.lensLoadOptions(p.tryOn) } : null
+      );
       cancel = m.preloadGlassesModelsAround(models, index);
     });
     return () => {

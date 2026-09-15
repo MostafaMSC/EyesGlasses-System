@@ -51,6 +51,49 @@ export interface ProductColor {
   hex: string;
 }
 
+/**
+ * What to do with the lens a generated (Hyper3D/Rodin) model arrives with.
+ * The generator bakes an opaque lens into the frame's own mesh; it is always
+ * taken out, and this decides what — if anything — replaces it.
+ *
+ * - `original`: a light transparent lens in the colour of the real product's
+ *   lens, so a brown sunglass still reads as brown on the face.
+ * - `clear`: a near-invisible lens, just enough surface to catch a highlight.
+ * - `none`: open rims, nothing in them.
+ */
+export type LensMode = "original" | "clear" | "none";
+
+export interface LensConfiguration {
+  mode: LensMode;
+  /** Tint drawn in `original` mode, as hex. Detected from the photo, or chosen by hand. */
+  color?: string;
+  /** How strongly the tint shows, 0..1. Clamped when drawn so the eyes always stay visible. */
+  tintStrength?: number;
+  /** What detection found, kept separately so a manual override doesn't erase it. */
+  detectedColor?: string;
+  detectedTintStrength?: number;
+  /** 0..1. Below `LENS_DETECTION_TRUSTED` the colour has to be picked by hand. */
+  detectionConfidence?: number;
+  detectionSource?: "photo" | "model-texture";
+}
+
+/** Detection confidence at or above which the detected colour is used as-is. */
+export const LENS_DETECTION_TRUSTED = 0.6;
+
+/**
+ * The lens configuration a product effectively has. Products saved before
+ * `lens` existed carry only `hideLenses`: on meant open rims, off meant the
+ * generated lens was left in place — which the new pipeline no longer does,
+ * so those become a tinted lens in the product's old lens colour instead.
+ */
+export function resolveLensConfig(tryOn: Pick<TryOnConfig, "lens" | "hideLenses" | "lensColor" | "lensOpacity">): LensConfiguration {
+  if (tryOn.lens) return tryOn.lens;
+  if (tryOn.hideLenses === false) {
+    return { mode: "original", color: tryOn.lensColor, tintStrength: tryOn.lensOpacity };
+  }
+  return { mode: "none" };
+}
+
 /** Lens-centre positions within an overlay image, as 0..1 fractions. */
 export interface OverlayGeometry {
   /** width / height of the image. */
@@ -118,12 +161,11 @@ export interface TryOnConfig {
    */
   model3d?: string;
   /**
-   * Strip the lens surfaces out of `model3d` when it is shown, leaving the
-   * rims open so the wearer's eyes show through. Generated models come with
-   * solid, opaque lenses baked into the frame's own mesh, which hides the
-   * customer's eyes — the opposite of what a try-on is for. Off for
-   * sunglasses, where the tint is the point.
+   * How the generated model's baked-in lens is handled. See `LensConfiguration`;
+   * read it through `resolveLensConfig`, which also understands `hideLenses`.
    */
+  lens?: LensConfiguration;
+  /** Superseded by `lens`. Kept so rows saved before it existed still resolve. */
   hideLenses?: boolean;
   /**
    * Side-profile photos (temple arm visible, unlike the arm-less front

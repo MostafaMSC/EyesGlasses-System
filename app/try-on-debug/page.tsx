@@ -25,6 +25,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Euler, MathUtils, Matrix4 } from "three";
 import { useProductStore } from "@/lib/productStore";
+import { resolveLensConfig, type LensMode, type Product } from "@/data/products";
+import { lensLoadOptions, loadGlassesModel } from "@/lib/threeTryOn/glassesModel";
+import type { LensAnalysis } from "@/lib/threeTryOn/lensGeometry";
 import { computeFacePose, PitchCalibrator, type NormalizedPoint } from "@/lib/faceGeometry";
 import {
   computeOverlayPlacement,
@@ -106,9 +109,56 @@ export default function TryOnDebugPage() {
   /** Defaults on, so the harness matches the live try-on out of the box. */
   const [mirrored, setMirrored] = useState(true);
   const overlay3dRef = useRef<GlassesOverlay3DHandle>(null);
+  /**
+   * Lens handling to try instead of the product's saved setting: each of the
+   * three modes, or the model exactly as exported. Lets every mode be checked
+   * on every model without saving anything.
+   */
+  const [lensOverride, setLensOverride] = useState<"product" | "raw" | LensMode>("product");
+  const [lensReport, setLensReport] = useState<{
+    key: string;
+    analysis: LensAnalysis;
+    applied: boolean;
+    removedFaces: number;
+    durationMs: number;
+  } | null>(null);
 
   // Falls back if the selected product was deleted from the admin panel.
-  const product = products.find((p) => p.id === productId) ?? products[0];
+  const stored = products.find((p) => p.id === productId) ?? products[0];
+  const product: Product | undefined = useMemo(() => {
+    if (!stored || lensOverride === "product" || lensOverride === "raw") return stored;
+    return { ...stored, tryOn: { ...stored.tryOn, lens: { ...resolveLensConfig(stored.tryOn), mode: lensOverride } } };
+  }, [stored, lensOverride]);
+  /** Empty options load the model exactly as exported, lens and all. */
+  const loadOptions = useMemo(
+    () => (lensOverride === "raw" ? {} : product ? lensLoadOptions(product.tryOn) : {}),
+    [lensOverride, product]
+  );
+
+  // What the lens pass did to this model — same cache entry the overlay uses.
+  // The report is tagged with what it was for, so a stale one isn't shown
+  // against a newly selected model or mode while the new load is in flight.
+  const reportKey = `${product?.tryOn.model3d ?? ""}|${JSON.stringify(loadOptions)}`;
+  useEffect(() => {
+    if (!product?.tryOn.model3d) return;
+    let cancelled = false;
+    loadGlassesModel(product.tryOn.model3d, loadOptions)
+      .then((model) => {
+        if (cancelled || !model.lens) return;
+        setLensReport({
+          key: reportKey,
+          analysis: model.lens.analysis,
+          applied: model.lens.applied,
+          removedFaces: model.lens.removedFaces,
+          durationMs: model.lens.durationMs,
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [product, loadOptions, reportKey]);
+  const currentReport = lensReport?.key === reportKey ? lensReport : null;
 
   const { landmarks, pose, placement, sideOverlay } = useMemo(() => {
     const lm = buildSyntheticLandmarks({
@@ -274,6 +324,7 @@ export default function TryOnDebugPage() {
               ref={overlay3dRef}
               product={product}
               rect={{ left: 0, top: 0, width: VIDEO_W, height: VIDEO_H }}
+              loadOptions={loadOptions}
             />
           ) : (
             <GlassesOverlay
@@ -317,9 +368,24 @@ export default function TryOnDebugPage() {
             mirrored (as the customer sees it)
           </label>
 
-          <label className="mb-4 flex items-center gap-2">
+          <label className="mb-2 flex items-center gap-2">
             <input type="checkbox" checked={render3d} onChange={(e) => setRender3d(e.target.checked)} />
             render in 3D (GLB / placeholder mesh + head mask)
+          </label>
+
+          <label className="mb-4 block">
+            lens (3D)
+            <select
+              value={lensOverride}
+              onChange={(e) => setLensOverride(e.target.value as typeof lensOverride)}
+              className="mt-1 block w-full rounded bg-white/10 p-2"
+            >
+              <option value="product">as saved on the product</option>
+              <option value="raw">raw — exactly as exported</option>
+              <option value="original">original colour</option>
+              <option value="clear">clear</option>
+              <option value="none">none</option>
+            </select>
           </label>
 
           <pre className="whitespace-pre-wrap rounded bg-white/10 p-3 leading-5">
@@ -344,6 +410,21 @@ export default function TryOnDebugPage() {
     ].join("\n")
   : "pose = NULL"}
           </pre>
+
+          {render3d && product.tryOn.model3d && (
+            <pre id="lens-report" className="mt-3 whitespace-pre-wrap rounded bg-white/10 p-3 leading-5">
+{currentReport
+  ? [
+      `lens.config   = ${lensOverride === "raw" ? "raw" : JSON.stringify(resolveLensConfig(product.tryOn))}`,
+      `lens.found    = ${currentReport.analysis.found}  applied = ${currentReport.applied}  removed = ${currentReport.removedFaces} faces  in ${currentReport.durationMs} ms`,
+      `lens.conf     = ${currentReport.analysis.confidence}  (${currentReport.analysis.lensFaces}/${currentReport.analysis.totalFaces} faces, L ${currentReport.analysis.left} / R ${currentReport.analysis.right}, coverage ${currentReport.analysis.coverage.toFixed(2)}, depth ${currentReport.analysis.depthSpread.toFixed(3)})`,
+      ...currentReport.analysis.reasons.map((r) => `  - ${r}`),
+    ].join("\n")
+  : lensOverride === "raw"
+  ? "lens = raw (no processing)"
+  : "lens = loading…"}
+            </pre>
+          )}
         </div>
       </div>
     </div>

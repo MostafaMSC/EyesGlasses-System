@@ -11,7 +11,8 @@ import {
   WebGLRenderer,
 } from "three";
 import { gltfLoader } from "@/lib/threeTryOn/gltfLoader";
-import { stripLenses } from "@/lib/threeTryOn/lensGeometry";
+import { applyLensConfig, type LensProcessingResult } from "@/lib/threeTryOn/lensGeometry";
+import type { LensConfiguration } from "@/data/products";
 
 /**
  * Renders a flat, front-on picture of a 3D frame, for use as the product's
@@ -141,6 +142,15 @@ export interface ModelThumbnail {
   dataUrl: string;
   /** Where the lenses ended up in the rendered picture. */
   geometry: { aspect: number; lensLeftX: number; lensRightX: number; lensY: number };
+  /** What the lens pass found and did, when one was requested. */
+  lens?: LensProcessingResult;
+}
+
+export interface RenderOptions {
+  lens?: LensConfiguration;
+  forceLens?: boolean;
+  /** Longest side of the saved picture. */
+  maxWidth?: number;
 }
 
 /**
@@ -153,14 +163,11 @@ export interface ModelThumbnail {
  * whole frame and reporting the real fractions keeps the image complete and
  * still lands correctly on the eyes in the 2D try-on.
  */
-export async function renderModelThumbnail(
-  url: string,
-  options: { hideLenses?: boolean } = {}
-): Promise<ModelThumbnail> {
+export async function renderModelThumbnail(url: string, options: RenderOptions = {}): Promise<ModelThumbnail> {
   const gltf = await gltfLoader().loadAsync(url);
   const model = gltf.scene;
   // The card should show what the customer will actually wear.
-  if (options.hideLenses) stripLenses(model);
+  const lens = options.lens ? applyLensConfig(model, options.lens, { force: options.forceLens }) : undefined;
 
   const canvas = document.createElement("canvas");
 
@@ -230,7 +237,7 @@ export async function renderModelThumbnail(
     const cropH = bounds.height + pad * 2;
 
     // Rendered big for the measurements above; saved at catalogue size.
-    const scale = Math.min(1, OUTPUT_MAX_WIDTH / cropW);
+    const scale = Math.min(1, (options.maxWidth ?? OUTPUT_MAX_WIDTH) / cropW);
     const out = document.createElement("canvas");
     out.width = Math.max(1, Math.round(cropW * scale));
     out.height = Math.max(1, Math.round(cropH * scale));
@@ -257,6 +264,7 @@ export async function renderModelThumbnail(
         lensRightX: toCropX(centreX + lensOffsetX) / cropW,
         lensY: (lensPxY - cropY) / cropH,
       },
+      lens,
     };
   } finally {
     disposeTree(model);

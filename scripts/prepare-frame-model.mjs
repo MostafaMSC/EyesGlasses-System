@@ -121,8 +121,9 @@ try {
   console.log(`  1. docker compose restart web            (~1s, no rebuild needed)`);
   console.log(`  2. In /admin, set the model path to:`);
   console.log(`\n       /assets/frames/${name}.glb\n`);
-  console.log(`  3. Open the try-on and turn your head. Lenses are hidden by default so`);
-  console.log(`     your eyes show; untick إخفاء العدسات in /admin for sunglasses.`);
+  console.log(`  3. In the same form, drop the product photo you gave Hyper3D into`);
+  console.log(`     "معالجة العدسات" so the lens gets the real product's colour, then`);
+  console.log(`     open the try-on and turn your head.`);
   console.log(`${"─".repeat(60)}\n`);
 } finally {
   rmSync(work, { recursive: true, force: true });
