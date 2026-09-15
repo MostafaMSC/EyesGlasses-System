@@ -74,9 +74,9 @@ export function ProductCard({ product, index = 0 }: { product: Product; index?: 
         </div>
 
         {canTryOn(product) && (
-          <span className="pointer-events-none absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full border border-line bg-surface/85 px-2.5 py-1 text-[11px] font-bold text-ink-soft backdrop-blur transition-all duration-400 group-hover:border-accent/40 group-hover:text-accent">
+          <span className="pointer-events-none absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full border border-line bg-surface/85 px-2 py-1 text-[11px] font-bold text-ink-soft backdrop-blur transition-all duration-400 group-hover:border-accent/40 group-hover:text-accent sm:px-2.5">
             <IconGlasses className="h-3.5 w-3.5 text-accent" />
-            تجربة افتراضية
+            <span className="hidden sm:inline">تجربة افتراضية</span>
           </span>
         )}
       </div>
