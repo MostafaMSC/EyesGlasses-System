@@ -25,6 +25,7 @@ import {
   type SideOverlaySelection,
 } from "@/lib/overlayPlacement";
 import type { GlassesOverlay3DHandle, OverlayRect } from "@/components/try-on/GlassesOverlay3D";
+import { isTryOnDebugEnabled, TryOnDebugOverlay } from "@/components/try-on/TryOnDebugOverlay";
 // Type-only, so this never pulls Three.js into this module's bundle.
 import type { MediapipeMatrix } from "@/lib/threeTryOn/faceMatrix";
 import { loadImage } from "@/lib/loadImage";
@@ -136,6 +137,12 @@ export function VirtualTryOnModal() {
   const [chosenMode, setChosenMode] = useState<RenderMode | null>(null);
   /** Set when 3D gave up on its own, so the reason isn't invisible. */
   const [threeUnavailable, setThreeUnavailable] = useState(false);
+  /**
+   * Development view of the fit, see `isTryOnDebugEnabled`. Read when the
+   * modal opens (not at render, which also runs on the server), and only
+   * then — flipping it mid-session isn't a use case.
+   */
+  const debugFit = useMemo(() => (isOpen ? isTryOnDebugEnabled() : false), [isOpen]);
 
   // A product with a real 3D model is best shown in 3D; a flat photo still
   // looks more like itself as a 2D cutout than as a generic placeholder mesh.
@@ -256,6 +263,7 @@ export function VirtualTryOnModal() {
   const updateThreeOverlay = useCallback(
     (
       pose: FacePose,
+      landmarks: NormalizedPoint[],
       tryOn: TryOnConfig,
       video: HTMLVideoElement,
       matrixData: MediapipeMatrix | undefined,
@@ -265,13 +273,16 @@ export function VirtualTryOnModal() {
         ? overlay3dRef.current?.update({
             matrixData,
             timestampMs,
+            landmarks,
             anchorU: pose.anchorX / video.videoWidth,
             anchorV: pose.anchorY / video.videoHeight,
             // `projectedWidth`, not `width`: the scene undoes the
             // foreshortening itself, from the rotation it is about to render.
-            projectedLensSpanFrac:
-              (pose.projectedWidth * tryOn.scale * DEFAULT_LENS_SPAN_FRAC) / video.videoWidth,
+            // The person's measurement only — the product's `scale` goes in
+            // separately, so it isn't baked into the calibration.
+            projectedLensSpanFrac: (pose.projectedWidth * DEFAULT_LENS_SPAN_FRAC) / video.videoWidth,
             faceWidthFrac: pose.templeWidth / video.videoWidth,
+            scale: tryOn.scale,
             offsetX: tryOn.offsetX,
             offsetY: tryOn.offsetY,
             rollOffsetDeg: tryOn.rotationOffset,
@@ -347,6 +358,7 @@ export function VirtualTryOnModal() {
             if (modeRef.current) {
               updateThreeOverlay(
                 pose,
+                faces[0],
                 currentProduct.tryOn,
                 video,
                 result?.facialTransformationMatrixes?.[0],
@@ -374,6 +386,8 @@ export function VirtualTryOnModal() {
   const retryPermission = useCallback(() => {
     requestCamera({ cancelled: false });
   }, [requestCamera]);
+
+  const readDebugInfo = useCallback(() => overlay3dRef.current?.debugInfo() ?? null, []);
 
   const handleCapture = async () => {
     const video = videoRef.current;
@@ -493,7 +507,10 @@ export function VirtualTryOnModal() {
                   {is3d ? (
                     // Mirrored along with the video by the wrapper above, so
                     // the 3D render and the face it sits on stay in step.
-                    <GlassesOverlay3D ref={overlay3dRef} product={product} rect={overlayRect} />
+                    <>
+                      <GlassesOverlay3D ref={overlay3dRef} product={product} rect={overlayRect} debug={debugFit} />
+                      {debugFit && <TryOnDebugOverlay rect={overlayRect} getInfo={readDebugInfo} />}
+                    </>
                   ) : (
                     <GlassesOverlay
                       product={product}

@@ -81,6 +81,23 @@ export interface LensConfiguration {
 export const LENS_DETECTION_TRUSTED = 0.6;
 
 /**
+ * Per-model corrections applied when a GLB is loaded, before anything is
+ * measured from it. Generated models mostly follow the convention (facing
+ * +Z, arms back along -Z, symmetric about X), but not always exactly; this is
+ * where a model that came out a few degrees off, or with its lenses at an
+ * unusual fraction of its width, is brought into line — once, per model,
+ * instead of with per-frame fudge factors.
+ */
+export interface ModelCalibration {
+  /** Rotation about X, Y, Z in degrees, applied to the model as exported. */
+  rotationDeg?: [number, number, number];
+  /** Translation as fractions of the model's width, applied after rotation. */
+  translation?: [number, number, number];
+  /** Where the lens centres sit as a fraction of the model's total width (default 0.45). */
+  lensSpanFraction?: number;
+}
+
+/**
  * The lens configuration a product effectively has. Products saved before
  * `lens` existed carry only `hideLenses`: on meant open rims, off meant the
  * generated lens was left in place — which the new pipeline no longer does,
@@ -160,6 +177,8 @@ export interface TryOnConfig {
    * the face automatically — and `scale`/`offsetX`/`offsetY` still fine-tune.
    */
   model3d?: string;
+  /** Corrections for a `model3d` that doesn't quite follow the convention. */
+  model3dCalibration?: ModelCalibration;
   /**
    * How the generated model's baked-in lens is handled. See `LensConfiguration`;
    * read it through `resolveLensConfig`, which also understands `hideLenses`.

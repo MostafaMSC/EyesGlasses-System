@@ -12,7 +12,8 @@ import {
 } from "three";
 import { gltfLoader } from "@/lib/threeTryOn/gltfLoader";
 import { applyLensConfig, type LensProcessingResult } from "@/lib/threeTryOn/lensGeometry";
-import type { LensConfiguration } from "@/data/products";
+import { applyCalibration } from "@/lib/threeTryOn/glassesModel";
+import type { LensConfiguration, ModelCalibration } from "@/data/products";
 
 /**
  * Renders a flat, front-on picture of a 3D frame, for use as the product's
@@ -149,6 +150,7 @@ export interface ModelThumbnail {
 export interface RenderOptions {
   lens?: LensConfiguration;
   forceLens?: boolean;
+  calibration?: ModelCalibration;
   /** Longest side of the saved picture. */
   maxWidth?: number;
 }
@@ -165,7 +167,7 @@ export interface RenderOptions {
  */
 export async function renderModelThumbnail(url: string, options: RenderOptions = {}): Promise<ModelThumbnail> {
   const gltf = await gltfLoader().loadAsync(url);
-  const model = gltf.scene;
+  const model = applyCalibration(gltf.scene, options.calibration);
   // The card should show what the customer will actually wear.
   const lens = options.lens ? applyLensConfig(model, options.lens, { force: options.forceLens }) : undefined;
 

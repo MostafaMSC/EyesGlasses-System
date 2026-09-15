@@ -1,8 +1,13 @@
-import { Box3, Group, Mesh, Object3D, Vector3 } from "three";
+import { Box3, Group, MathUtils, Mesh, Object3D, Vector3 } from "three";
 import { gltfLoader } from "@/lib/threeTryOn/gltfLoader";
 import { buildProceduralFrame } from "@/lib/threeTryOn/proceduralFrame";
 import { applyLensConfig, type LensProcessingResult } from "@/lib/threeTryOn/lensGeometry";
-import { resolveLensConfig, type LensConfiguration, type TryOnConfig } from "@/data/products";
+import {
+  resolveLensConfig,
+  type LensConfiguration,
+  type ModelCalibration,
+  type TryOnConfig,
+} from "@/data/products";
 
 /**
  * A glasses model ready to be placed on a face. Its root is already shifted so
@@ -77,10 +82,10 @@ const MIN_LENS_SAMPLES = 50;
  * lenses sit and averaging their height — on a real frame those columns are
  * almost entirely lens surface and rim, centred on the optical axis.
  */
-function measureLensHeight(object: Object3D, box: Box3, size: Vector3): number {
+function measureLensHeight(object: Object3D, box: Box3, size: Vector3, lensSpanFraction: number): number {
   const frontCut = box.max.z - size.z * FRONT_SLICE;
   const centreX = (box.min.x + box.max.x) / 2;
-  const lensOffsetX = size.x * (GLB_LENS_SPAN_FRACTION / 2);
+  const lensOffsetX = size.x * (lensSpanFraction / 2);
   const tolerance = size.x * LENS_COLUMN;
 
   const vertex = new Vector3();
@@ -132,16 +137,48 @@ export interface LoadOptions {
   lens?: LensConfiguration;
   /** Apply the lens pass even when the classification isn't confident. */
   forceLens?: boolean;
+  /** Per-model corrections, applied before anything is measured. */
+  calibration?: ModelCalibration;
 }
 
 /** The load options a product's try-on settings call for. */
-export function lensLoadOptions(tryOn: Pick<TryOnConfig, "lens" | "hideLenses" | "lensColor" | "lensOpacity">): LoadOptions {
-  return { lens: resolveLensConfig(tryOn) };
+export function lensLoadOptions(
+  tryOn: Pick<TryOnConfig, "lens" | "hideLenses" | "lensColor" | "lensOpacity" | "model3dCalibration">
+): LoadOptions {
+  return { lens: resolveLensConfig(tryOn), calibration: tryOn.model3dCalibration };
+}
+
+/**
+ * Brings a model into the convention (facing +Z, arms back along -Z) when
+ * its export didn't quite: a rotation and a translation (as fractions of the
+ * model's width, so the numbers mean the same on a model in metres and one in
+ * millimetres) baked into a wrapper group. Done here, once per load, so every
+ * measurement below sees the corrected model.
+ */
+export function applyCalibration(scene: Object3D, calibration: ModelCalibration | undefined): Object3D {
+  const rotation = calibration?.rotationDeg;
+  const translation = calibration?.translation;
+  if (!rotation && !translation) return scene;
+  const wrapper = new Group();
+  wrapper.add(scene);
+  if (rotation) {
+    scene.rotation.set(
+      MathUtils.DEG2RAD * rotation[0],
+      MathUtils.DEG2RAD * rotation[1],
+      MathUtils.DEG2RAD * rotation[2]
+    );
+  }
+  if (translation) {
+    const width = measure(scene).size.x;
+    scene.position.set(translation[0] * width, translation[1] * width, translation[2] * width);
+  }
+  return wrapper;
 }
 
 async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesModel> {
   const gltf = await gltfLoader().loadAsync(url);
-  const scene = gltf.scene;
+  const scene = applyCalibration(gltf.scene, options.calibration);
+  const lensSpanFraction = options.calibration?.lensSpanFraction ?? GLB_LENS_SPAN_FRACTION;
 
   const { box, size } = measure(scene);
   if (!(size.x > 0) || !Number.isFinite(size.x)) {
@@ -156,7 +193,11 @@ async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesMo
   //
   // Measured before the lens pass, so what the pass adds or removes can never
   // move the anchor: a model sits on the face identically in every lens mode.
-  const anchor = new Vector3(box.getCenter(new Vector3()).x, measureLensHeight(scene, box, size), box.max.z);
+  const anchor = new Vector3(
+    box.getCenter(new Vector3()).x,
+    measureLensHeight(scene, box, size, lensSpanFraction),
+    box.max.z
+  );
 
   // Before anchoring: the lens surfaces are found relative to the model's
   // own bounding box, which anchoring shifts. Once per load, never per frame
@@ -167,7 +208,7 @@ async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesMo
 
   return {
     root,
-    lensSpan: size.x * GLB_LENS_SPAN_FRACTION,
+    lensSpan: size.x * lensSpanFraction,
     width: size.x,
     height: size.y,
     lens,
@@ -206,9 +247,11 @@ export function loadGlassesModel(url: string, options: LoadOptions = {}): Promis
  */
 function cacheKey(url: string, options: LoadOptions): string {
   const lens = options.lens;
-  if (!lens) return `${url}#lens=raw`;
+  const c = options.calibration;
+  const calibration = c ? `#cal=${(c.rotationDeg ?? []).join(",")}|${(c.translation ?? []).join(",")}|${c.lensSpanFraction ?? ""}` : "";
+  if (!lens) return `${url}#lens=raw${calibration}`;
   const tint = lens.mode === "original" ? `:${lens.color ?? ""}:${lens.tintStrength ?? ""}` : "";
-  return `${url}#lens=${lens.mode}${tint}${options.forceLens ? ":force" : ""}`;
+  return `${url}#lens=${lens.mode}${tint}${options.forceLens ? ":force" : ""}${calibration}`;
 }
 
 /** Keys whose load has finished — the models that can be shown with no wait. */
@@ -285,15 +328,4 @@ export function preloadGlassesModelsAround(
   return () => {
     cancelled = true;
   };
-}
-
-/**
- * Uniform scale that makes the model's lens centres land exactly on the face's
- * measured lens-centre span — the "automatic scale from facial landmarks"
- * step. `targetLensSpan` comes from the live landmark measurements, so this is
- * recomputed every frame and tracks the user moving closer or further away.
- */
-export function fitScale(model: GlassesModel, targetLensSpan: number): number {
-  if (!(model.lensSpan > 0)) return 1;
-  return targetLensSpan / model.lensSpan;
 }

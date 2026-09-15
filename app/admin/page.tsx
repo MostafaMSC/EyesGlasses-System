@@ -7,6 +7,7 @@ import {
   resolveLensConfig,
   type Availability,
   type LensConfiguration,
+  type ModelCalibration,
   type Product,
 } from "@/data/products";
 import { AdminShell } from "@/components/admin/AdminShell";
@@ -98,6 +99,7 @@ interface FormState {
   rightAspect: number;
   model3d: string;
   lens: LensConfiguration;
+  model3dCalibration: ModelCalibration;
 }
 
 const EMPTY: FormState = {
@@ -138,7 +140,17 @@ const EMPTY: FormState = {
   // always replaced, by default with a light lens in the product's real
   // colour, which the panel reads from the product photo.
   lens: { mode: "original" },
+  model3dCalibration: {},
 };
+
+/** A calibration with every field at its default is not worth storing. */
+function compactCalibration(c: ModelCalibration): ModelCalibration | undefined {
+  const out: ModelCalibration = {};
+  if (c.rotationDeg?.some((v) => v !== 0)) out.rotationDeg = c.rotationDeg;
+  if (c.translation?.some((v) => v !== 0)) out.translation = c.translation;
+  if (c.lensSpanFraction && c.lensSpanFraction !== 0.45) out.lensSpanFraction = c.lensSpanFraction;
+  return Object.keys(out).length ? out : undefined;
+}
 
 export default function AdminPage() {
   const {
@@ -250,7 +262,9 @@ export default function AdminPage() {
             rightImageGeometry: { aspect: form.rightAspect, anchorX: form.rightAnchorX, anchorY: form.rightAnchorY },
           }
         : {}),
-      ...(form.model3d ? { model3d: form.model3d, lens: form.lens } : {}),
+      ...(form.model3d
+        ? { model3d: form.model3d, lens: form.lens, model3dCalibration: compactCalibration(form.model3dCalibration) }
+        : {}),
     },
   });
 
@@ -422,6 +436,7 @@ export default function AdminPage() {
       // detail, and the path is what gets edited and stored.
       model3d: stripModelVersion(t.model3d ?? ""),
       lens: resolveLensConfig(t),
+      model3dCalibration: t.model3dCalibration ?? {},
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
@@ -750,6 +765,8 @@ export default function AdminPage() {
               onChange={(v) => set("model3d", v)}
               lens={form.lens}
               onLensChange={(v) => set("lens", v)}
+              calibration={form.model3dCalibration}
+              onCalibrationChange={(v) => set("model3dCalibration", v)}
               sourcePhoto={
                 (form.commerce.gallery.find((g) => g.kind === "front") ?? form.commerce.gallery[0])?.src ?? null
               }
@@ -1313,6 +1330,8 @@ function Model3dField({
   onThumbnail,
   lens,
   onLensChange,
+  calibration,
+  onCalibrationChange,
   sourcePhoto,
   onSourcePhoto,
 }: {
@@ -1324,6 +1343,8 @@ function Model3dField({
   onThumbnail: (result: import("@/lib/threeTryOn/renderModelThumbnail").ModelThumbnail) => void;
   lens: LensConfiguration;
   onLensChange: (value: LensConfiguration) => void;
+  calibration: ModelCalibration;
+  onCalibrationChange: (value: ModelCalibration) => void;
   sourcePhoto: string | null;
   onSourcePhoto: (dataUrl: string) => void;
 }) {
@@ -1391,18 +1412,20 @@ function Model3dField({
 
   // Only the parts of the lens setting that change the picture, so retyping
   // a detection result that draws the same thing doesn't re-render it.
-  const lensKey = `${lens.mode}|${lens.mode === "original" ? `${lens.color ?? ""}|${lens.tintStrength ?? ""}` : ""}`;
+  const lensKey = `${lens.mode}|${lens.mode === "original" ? `${lens.color ?? ""}|${lens.tintStrength ?? ""}` : ""}|${JSON.stringify(calibration)}`;
   const lensRef = useRef(lens);
+  const calibrationRef = useRef(calibration);
   useEffect(() => {
     lensRef.current = lens;
-  }, [lens]);
+    calibrationRef.current = calibration;
+  }, [lens, calibration]);
 
   const makeThumbnail = useCallback(async () => {
     if (!value) return;
     setRendering(true);
     try {
       const { renderModelThumbnail } = await import("@/lib/threeTryOn/renderModelThumbnail");
-      const result = await renderModelThumbnail(value, { lens: lensRef.current });
+      const result = await renderModelThumbnail(value, { lens: lensRef.current, calibration: calibrationRef.current });
       setLastGenerated(result.dataUrl);
       onThumbnail(result);
     } catch (err) {
@@ -1566,6 +1589,8 @@ function Model3dField({
         onError={onError}
       />
 
+      {value && <ModelCalibrationFields value={calibration} onChange={onCalibrationChange} />}
+
       {reading && (
         <p className="mt-2 flex items-center gap-1.5 text-[11px] font-bold text-accent">
           <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
@@ -1573,6 +1598,62 @@ function Model3dField({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * Corrections for a model that didn't come out exactly on the convention.
+ * Rarely needed — every generated model so far has been fine — so it is
+ * folded away; the try-on debug harness is where the effect is checked.
+ */
+function ModelCalibrationFields({
+  value,
+  onChange,
+}: {
+  value: ModelCalibration;
+  onChange: (value: ModelCalibration) => void;
+}) {
+  const rotation = value.rotationDeg ?? [0, 0, 0];
+  const translation = value.translation ?? [0, 0, 0];
+  const setTriple = (key: "rotationDeg" | "translation", index: number, v: number) => {
+    const next = [...(key === "rotationDeg" ? rotation : translation)] as [number, number, number];
+    next[index] = Number.isFinite(v) ? v : 0;
+    onChange({ ...value, [key]: next });
+  };
+  const numberCls = `${inputCls} h-9 px-2 text-xs`;
+  return (
+    <details className="mt-3 rounded-2xl border border-line bg-surface-2 p-4">
+      <summary className="cursor-pointer text-xs font-bold text-ink-soft">معايرة المجسم (متقدم)</summary>
+      <p className="mt-2 text-[11px] leading-5 text-muted">
+        للمجسم الذي لم يُصدَّر بالاتجاه القياسي (الواجهة نحو +Z والأذرع للخلف): تدوير بالدرجات،
+        وإزاحة كنسبة من عرض المجسم، وموضع مركزَي العدستين كنسبة من العرض (الافتراضي 0.45). تُطبَّق
+        مرة واحدة عند تحميل المجسم، لا في كل إطار. راجع النتيجة في <code>/try-on-debug</code>.
+      </p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        {(["X", "Y", "Z"] as const).map((axis, i) => (
+          <Field key={axis} label={`تدوير ${axis} (درجة)`}>
+            <input type="number" dir="ltr" step={1} value={rotation[i]} onChange={(e) => setTriple("rotationDeg", i, Number(e.target.value))} className={numberCls} />
+          </Field>
+        ))}
+        {(["X", "Y", "Z"] as const).map((axis, i) => (
+          <Field key={axis} label={`إزاحة ${axis} (نسبة من العرض)`}>
+            <input type="number" dir="ltr" step={0.01} value={translation[i]} onChange={(e) => setTriple("translation", i, Number(e.target.value))} className={numberCls} />
+          </Field>
+        ))}
+        <Field label="نسبة مركزَي العدستين من العرض">
+          <input
+            type="number"
+            dir="ltr"
+            step={0.01}
+            min={0.2}
+            max={0.8}
+            value={value.lensSpanFraction ?? 0.45}
+            onChange={(e) => onChange({ ...value, lensSpanFraction: Number(e.target.value) || 0.45 })}
+            className={numberCls}
+          />
+        </Field>
+      </div>
+    </details>
   );
 }
 

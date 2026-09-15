@@ -92,6 +92,10 @@ function buildSyntheticLandmarks(opts: {
     landmarks[Number(indexStr)] = {
       x: (centerX + rx) / VIDEO_W,
       y: (centerY + ry) / VIDEO_H,
+      // MediaPipe's z: same scale as x, negative toward the camera. The head
+      // model's z is positive toward the camera; roll is in the screen plane
+      // so only the yawed depth matters.
+      z: (-(-x * Math.sin(yaw) + zp * Math.cos(yaw)) * headHalfWidthPx) / VIDEO_W,
     };
   }
   return landmarks;
@@ -238,11 +242,12 @@ export default function TryOnDebugPage() {
       // Shaped like MediaPipe's payload, column-major as Three.js stores it.
       matrixData: { rows: 4, columns: 4, data: matrix.toArray() },
       timestampMs: 0,
+      landmarks,
       anchorU: pose.anchorX / VIDEO_W,
       anchorV: pose.anchorY / VIDEO_H,
-      projectedLensSpanFrac:
-        (pose.projectedWidth * product.tryOn.scale * LENS_SPAN_FRAC) / VIDEO_W,
+      projectedLensSpanFrac: (pose.projectedWidth * LENS_SPAN_FRAC) / VIDEO_W,
       faceWidthFrac,
+      scale: product.tryOn.scale,
       offsetX: product.tryOn.offsetX,
       offsetY: product.tryOn.offsetY,
       rollOffsetDeg: product.tryOn.rotationOffset,

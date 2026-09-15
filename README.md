@@ -410,20 +410,44 @@ geometry instead, in `lib/threeTryOn/`:
    matrix was solved against (63° vertical FOV, centimetre units) — if the
    camera disagrees, the frame drifts off the eyes as the head moves
    off-centre.
-3. **Position and size stay landmark-driven.** The frame is placed on the ray
-   through the same tuned anchor the 2D path uses (pupil line pulled toward
-   the nose bridge) at the head's depth, and scaled every frame so the model's
-   lens centres land on the measured lens-centre span. That means moving
-   closer or further is tracked continuously, per-product `scale`/`offsetX`/
-   `offsetY` keep working, and toggling 2D↔3D doesn't change how big the frame
-   looks.
+3. **The frame is rigidly attached to that head** (`lib/threeTryOn/headFrame.ts`).
+   Where glasses rest on a head — at the nose bridge, a few centimetres in
+   front of the skull's centre — and how wide the frame is do not change when
+   the head turns, so neither of them is measured per frame. They are
+   *calibrated*: on frames where the head is close to frontal (within ~22° of
+   yaw, where 2D measurements are honest), the bridge's position is read off
+   the landmarks — including its depth, from the landmark's own z — expressed
+   in head space and averaged; likewise the lens-centre span in centimetres.
+   After that every frame is `anchor = T + R · N`: the matrix's translation
+   plus the calibrated offset carried by the matrix's rotation. One uniform
+   scale (span in cm ÷ the model's span) and the perspective camera do the
+   rest — moving closer or further, turning, tilting, all fall out of the
+   same rigid transform, and the frame cannot stretch. Per-product
+   `scale`/`offsetX`/`offsetY`/`rotationOffset` are applied inside that
+   frame, so they follow the head too.
 4. **Occlusion** is an invisible ellipsoid head mask — `colorWrite: false`,
    so it writes depth but paints nothing, letting the camera feed show through
    while punching away the frame's own pixels behind it. That is what makes
    the temple arms genuinely pass behind the ears instead of floating over
-   hair. It is sized from the face's own measured temple width (see
-   `HEAD_MASK` in `lib/threeTryOn/tryOnScene.ts`) — the constant to adjust if
-   arms ever vanish too early or show through the head.
+   hair. It is a skull-sized ellipsoid behind the bridge, in real-head
+   proportions of the measured temple width, and it is clipped at a plane
+   just behind the lenses so it can reach the face without ever hiding the
+   rims (`HEAD_MASK` in `lib/threeTryOn/headFrame.ts` — the constants to
+   adjust if arms ever vanish too early or show through the head).
+5. **Per-model calibration** (`tryOn.model3dCalibration`, "معايرة المجسم" in
+   `/admin`): a rotation, a translation (as fractions of the model's width)
+   and the lens-centre fraction, applied once when the GLB loads, for a
+   model that didn't come out exactly on the convention.
+
+To see the maths on a real face, open any page with `?tryOnDebug=1` (or set
+`localStorage.tryOnDebug = "1"`) and start the 3D try-on: the landmarks the
+head frame is built from (168, 6, 33, 263, 234, 454), the face and eye
+centres, the anchor, the head's right/up/forward axes, and the live
+yaw/pitch/roll, IPD, frame width, scale, position and rotation are drawn over
+the camera. Smoothing: the pose matrix is One-Euro filtered per channel in
+`FaceMatrixSmoother` (`lib/threeTryOn/faceMatrix.ts`, position looser than
+rotation); the calibrated constants use `HEAD_CALIBRATION` (a short plain
+average, then a slow follow rate).
 
 A **2D/3D toggle** in the try-on header switches between the two renderers, so
 the same face can be compared side by side. Products with a `model3d` default

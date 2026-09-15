@@ -9,6 +9,12 @@
       "autoPort": true
     },
     {
+      "name": "abu-thar-eyewear-3011",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["next", "dev", "-p", "3011"],
+      "port": 3011
+    },
+    {
       "name": "abu-thar-eyewear-prod",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "start"],

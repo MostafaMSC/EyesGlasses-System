@@ -10,7 +10,7 @@ import {
   type GlassesModel,
   type LoadOptions,
 } from "@/lib/threeTryOn/glassesModel";
-import { TryOnScene, type FaceFrameInput } from "@/lib/threeTryOn/tryOnScene";
+import { TryOnScene, type FaceFrameInput, type TryOnDebugInfo } from "@/lib/threeTryOn/tryOnScene";
 
 /** On-screen rectangle the camera feed actually occupies, in CSS pixels. */
 export interface OverlayRect {
@@ -36,6 +36,8 @@ export interface GlassesOverlay3DHandle {
    * has to be redrawn in the same synchronous step that reads it.
    */
   captureCanvas(): HTMLCanvasElement | null;
+  /** The last frame's measurements, when `debug` is on. Same object every call. */
+  debugInfo(): TryOnDebugInfo | null;
 }
 
 export const GlassesOverlay3D = forwardRef<
@@ -45,8 +47,10 @@ export const GlassesOverlay3D = forwardRef<
     rect: OverlayRect | null;
     /** Overrides the product's own lens handling — for the debug harness. */
     loadOptions?: LoadOptions;
+    /** Collect the per-frame measurements the development overlay draws. */
+    debug?: boolean;
   }
->(function GlassesOverlay3D({ product, rect, loadOptions: loadOptionsOverride }, ref) {
+>(function GlassesOverlay3D({ product, rect, loadOptions: loadOptionsOverride, debug = false }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<TryOnScene | null>(null);
   /** Models we built ourselves and must dispose; cached GLBs are shared. */
@@ -132,6 +136,10 @@ export const GlassesOverlay3D = forwardRef<
     sceneRef.current?.resize(rect.width, rect.height, rect.width / rect.height);
   }, [rect]);
 
+  useEffect(() => {
+    if (sceneRef.current) sceneRef.current.collectDebug = debug;
+  }, [debug]);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -147,6 +155,10 @@ export const GlassesOverlay3D = forwardRef<
         if (!scene) return null;
         scene.render();
         return scene.canvas;
+      },
+      debugInfo() {
+        const scene = sceneRef.current;
+        return scene?.collectDebug ? scene.debug : null;
       },
     }),
     []
