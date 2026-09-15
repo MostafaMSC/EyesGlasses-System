@@ -6,7 +6,7 @@ import {
   DoubleSide,
   Float32BufferAttribute,
   Mesh,
-  MeshStandardMaterial,
+  MeshPhysicalMaterial,
   Object3D,
   Vector3,
 } from "three";
@@ -98,12 +98,23 @@ interface MeshClassification {
   back: number[];
 }
 
-interface Classification {
+export interface Classification {
   meshes: MeshClassification[];
   analysis: LensAnalysis;
 }
 
-function classify(root: Object3D): Classification {
+/**
+ * Walks every face of `root` and works out which ones are the generator's
+ * baked-in lens. This is the expensive part of the whole lens pass — O(faces)
+ * trig per face across the *entire* model, tens of milliseconds on a typical
+ * generated frame (see `LensProcessingResult.durationMs`) — and it depends
+ * only on geometry, never on the chosen lens mode or colour. Exported so a
+ * caller that needs to apply several different lens configs to the same
+ * source model (the admin's three-mode preview; a colour slider being
+ * dragged) can classify once and reuse the result via `applyLensConfigCached`
+ * instead of paying this cost again for every config.
+ */
+export function classify(root: Object3D): Classification {
   const box = new Box3().setFromObject(root);
   const size = box.getSize(new Vector3());
   const meshes: MeshClassification[] = [];
@@ -292,21 +303,42 @@ function clampOpacity(value: number | undefined, fallback: number): number {
 }
 
 /**
- * The material a replacement lens is drawn with. Deliberately a plain
- * transparent surface rather than refractive glass: it has to blend over a
- * live camera feed on a phone, and a lightly tinted sheet that catches a
- * highlight from the scene's environment map is exactly what a lens looks like
- * there — transmission and thickness would only add cost and depth artifacts.
+ * The material a replacement lens is drawn with.
+ *
+ * The transparent overlay canvas here is a separate DOM layer sitting *over*
+ * the camera's `<video>` element (see `GlassesOverlay3D`/`TryOnScene`) — the
+ * browser composites the two with ordinary alpha-over, not WebGL. That rules
+ * out multiplicative/"overlay" blend modes for the tint itself: they only
+ * see whatever else has already been drawn *inside this WebGL scene* (the
+ * frame, mainly — nothing, everywhere else), never the video underneath, so
+ * multiplying against it would darken the lens toward black instead of
+ * tinting the face. Alpha blending is the one blend mode whose output — a
+ * semi-transparent tinted pixel — the browser's own compositor then correctly
+ * lays over the live video for us; `opacity` (from `tintStrength`) is what
+ * that alpha is.
+ *
+ * What alpha blending on its own doesn't give is the look of glass rather
+ * than tinted plastic: a single flat colour reads as a decal. `clearcoat`
+ * adds a second, sharper specular layer on top of the base one — a crisp
+ * highlight distinct from the diffuse tint, exactly what catches the eye on
+ * real lens glass. It is a pure BRDF term costing one extra light
+ * evaluation, not `transmission` (real refraction), which would need the
+ * renderer to capture the scene behind the lens into an offscreen target
+ * every frame — real per-frame cost in the live camera try-on, and for
+ * nothing: what a customer's lens is actually "held up in front of" is that
+ * same off-limits video layer.
  */
-export function createLensMaterial(config: LensConfiguration): MeshStandardMaterial {
+export function createLensMaterial(config: LensConfiguration): MeshPhysicalMaterial {
   const clear = config.mode === "clear";
-  return new MeshStandardMaterial({
+  return new MeshPhysicalMaterial({
     color: new Color(clear ? "#ffffff" : config.color || "#ffffff"),
     transparent: true,
     opacity: clear ? CLEAR_LENS_OPACITY : clampOpacity(config.tintStrength, DEFAULT_TINT_STRENGTH),
-    roughness: clear ? 0.05 : 0.1,
+    roughness: clear ? 0.05 : 0.08,
     metalness: 0,
-    envMapIntensity: 0.8,
+    clearcoat: 1,
+    clearcoatRoughness: 0.05,
+    envMapIntensity: clear ? 0.9 : 1.1,
     // No depth write: the lens is a single thin sheet drawn after the frame,
     // and writing depth would let it punch the far rim and arms out of view
     // wherever they sit behind it.
@@ -364,14 +396,37 @@ export interface LensProcessingResult {
  * lens (`LENS_GEOMETRY_TRUSTED`): an unusual model is left exactly as loaded
  * rather than having unknown geometry cut out of it. `force` overrides that
  * for an admin who has looked at the result and wants it anyway.
+ *
+ * Classifies `root` itself — the expensive step. A caller applying several
+ * configs to the same source model (comparing modes; a colour slider being
+ * dragged) should classify once and call `applyLensConfigCached` instead.
  */
 export function applyLensConfig(
   root: Object3D,
   config: LensConfiguration,
   options: { force?: boolean } = {}
 ): LensProcessingResult {
+  return applyLensConfigCached(root, classify(root), config, options);
+}
+
+/**
+ * Same as `applyLensConfig`, given a classification already computed for a
+ * model with the same mesh structure — typically `targetRoot` itself
+ * (reapplying a different config to the same object isn't meaningful, since
+ * the first application already stripped its geometry) or a geometry-only
+ * clone of the model that classification came from (see
+ * `renderModelThumbnail`'s per-model cache). Re-associates the cached
+ * per-mesh face lists with `targetRoot`'s own meshes by traversal order,
+ * which `classify` and every caller here use consistently.
+ */
+export function applyLensConfigCached(
+  targetRoot: Object3D,
+  classification: Classification,
+  config: LensConfiguration,
+  options: { force?: boolean } = {}
+): LensProcessingResult {
   const started = performance.now();
-  const { meshes, analysis } = classify(root);
+  const { analysis } = classification;
   const result: LensProcessingResult = { analysis, applied: false, removedFaces: 0, lensMeshes: [], durationMs: 0 };
   const finish = () => {
     result.durationMs = Math.round((performance.now() - started) * 10) / 10;
@@ -380,10 +435,18 @@ export function applyLensConfig(
   if (!analysis.found) return finish();
   if (analysis.confidence < LENS_GEOMETRY_TRUSTED && !options.force) return finish();
 
+  const targetMeshes: Mesh[] = [];
+  targetRoot.traverse((node) => {
+    const mesh = node as Mesh;
+    if (mesh.isMesh) targetMeshes.push(mesh);
+  });
+
   const material = config.mode === "none" ? null : createLensMaterial(config);
-  for (const { mesh, keep, front, back } of meshes) {
+  classification.meshes.forEach(({ keep, front, back }, i) => {
+    const mesh = targetMeshes[i];
+    if (!mesh) return;
     const dropped = (front.length + back.length) / 3;
-    if (dropped === 0) continue;
+    if (dropped === 0) return;
     const geometry = mesh.geometry;
     if (material && front.length > 0) {
       const lens = new Mesh(extractFaces(geometry, front), material);
@@ -396,7 +459,7 @@ export function applyLensConfig(
     }
     geometry.setIndex(new BufferAttribute(Uint32Array.from(keep), 1));
     result.removedFaces += dropped;
-  }
+  });
   result.applied = result.removedFaces > 0;
   return finish();
 }

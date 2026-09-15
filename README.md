@@ -488,11 +488,21 @@ checked across yaw without a camera.
     product's lens colour. The colour is read from the product photo (the
     one given to Hyper3D — drop it into the section, it is kept as the
     product's front photo) by `lib/lensColorDetection.ts`: it finds the front
-    of the frame, grows one region per lens that stops at the rim, shrinks it
-    inward, discards highlights and rim-coloured pixels, and takes a median.
+    of the frame, grows one region per lens that stops at the rim, then
+    samples only the *interior* — an ellipse eroded ~18% in from the region's
+    own edge, centred on its measured centroid, which is where rim bleed,
+    hinge shadows and flood-fill fringing all live — discarding glare
+    (bright, desaturated pixels) and near-black edge pixels along the way.
+    The representative colour is a median taken in HSV, not RGB: hue as a
+    circular mean (immune to the wraparound a plain numeric average of
+    degrees gets wrong) with saturation/value as plain medians, and the same
+    for combining the two lenses' colours — an RGB average of a warm-lit left
+    lens and a cool-lit right one can drift toward a hue neither side has.
     Without a photo the same detector runs on a render of the model, which
     is only ever offered as a hint (the generator's lens colour is the thing
-    in doubt) — below the trust threshold the colour has to be picked by hand.
+    in doubt) — below the trust threshold the colour has to be picked by hand,
+    and a lens whose two sides disagree past a set margin is also held back
+    rather than averaged into something neither side actually is.
   - **شفافة** — near-invisible, just enough surface to catch a highlight.
   - **بدون عدسة** — open rims (what the old **إخفاء العدسات** toggle did;
     rows saved with it still resolve, see `resolveLensConfig`).
@@ -504,10 +514,20 @@ checked across yaw without a camera.
   scored (symmetry, how much of the opening it fills, flatness) and applied
   only when confident; otherwise the model is shown as exported and the
   panel says why. For the tinted and clear modes the lens's own *front*
-  surface is rebuilt as a separate mesh with a plain transparent material —
-  the generator's exact lens shape, not a generic disc. All of this runs
-  once per model at load, in a few milliseconds, and is cached; nothing
-  happens per camera frame. The served `.glb` is never modified. The three
+  surface is rebuilt as a separate mesh — the generator's exact lens shape,
+  not a generic disc — with a `MeshPhysicalMaterial`: plain alpha
+  transparency for the tint itself (the try-on's canvas is a transparent
+  WebGL layer sitting *over* a separate `<video>` element, composited by the
+  browser, not by WebGL — a multiply/overlay blend mode would have nothing
+  of the video to blend against and can't be used here), plus a `clearcoat`
+  layer for the sharp secondary specular highlight that reads as glass
+  rather than flat tinted plastic. Classification (`classify()`, the
+  expensive per-face pass) runs once per model at load and is cached
+  separately from the lens config, so trying different modes/colours on the
+  same model — the admin's three-mode preview, a colour slider being dragged
+  — never re-fetches or re-parses the `.glb` or re-classifies it, only
+  rebuilds the small lens mesh and its material; nothing happens per camera
+  frame either way, and the served `.glb` itself is never modified. The three
   modes can be compared on every model in `/try-on-debug` ("lens (3D)").
 
 ### Where the model file lives

@@ -11,7 +11,7 @@ import {
   WebGLRenderer,
 } from "three";
 import { gltfLoader } from "@/lib/threeTryOn/gltfLoader";
-import { applyLensConfig, type LensProcessingResult } from "@/lib/threeTryOn/lensGeometry";
+import { applyLensConfigCached, classify, type Classification, type LensProcessingResult } from "@/lib/threeTryOn/lensGeometry";
 import { applyCalibration } from "@/lib/threeTryOn/glassesModel";
 import type { LensConfiguration, ModelCalibration } from "@/data/products";
 
@@ -128,6 +128,56 @@ function opaqueBounds(
   return { minX, minY, width: maxX - minX + 1, height: maxY - minY + 1 };
 }
 
+/**
+ * Parsed model + its lens classification, cached per (url, calibration) —
+ * both are pure functions of the geometry, never of the lens mode or colour
+ * a caller asks for. The admin's live preview calls this repeatedly while
+ * someone drags a tint slider or flips between the three lens modes; without
+ * this cache each of those calls would re-fetch the GLB over the network,
+ * re-parse it, and re-run `classify()` (tens of milliseconds of per-face
+ * trig — the dominant cost of the whole render, per `durationMs`) for
+ * something that never changed. A colour-only change now costs one cheap
+ * geometry clone (`cloneForLens`) plus building the small lens mesh.
+ */
+const pristineCache = new Map<string, Promise<{ scene: Object3D; classification: Classification }>>();
+
+function pristineCacheKey(url: string, calibration: ModelCalibration | undefined): string {
+  if (!calibration) return url;
+  return `${url}#cal=${(calibration.rotationDeg ?? []).join(",")}|${(calibration.translation ?? []).join(",")}|${calibration.lensSpanFraction ?? ""}`;
+}
+
+async function loadPristine(url: string, calibration: ModelCalibration | undefined) {
+  const key = pristineCacheKey(url, calibration);
+  let pending = pristineCache.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const gltf = await gltfLoader().loadAsync(url);
+      const scene = applyCalibration(gltf.scene, calibration);
+      return { scene, classification: classify(scene) };
+    })();
+    pristineCache.set(key, pending);
+    pending.catch(() => pristineCache.delete(key));
+  }
+  return pending;
+}
+
+/**
+ * A fresh copy of `root` safe to strip lens faces from: every mesh's own
+ * geometry is cloned (a typed-array copy, not a re-parse), so applying a
+ * lens config to the clone can never touch the cached pristine model. Object
+ * identity and traversal order match the source exactly, which is what lets
+ * `applyLensConfigCached` re-associate a classification computed on the
+ * pristine model with this clone's meshes.
+ */
+function cloneForLens(root: Object3D): Object3D {
+  const clone = root.clone(true);
+  clone.traverse((node) => {
+    const mesh = node as Mesh;
+    if (mesh.isMesh) mesh.geometry = mesh.geometry.clone();
+  });
+  return clone;
+}
+
 function disposeTree(object: Object3D) {
   object.traverse((node) => {
     const mesh = node as Mesh;
@@ -166,10 +216,12 @@ export interface RenderOptions {
  * still lands correctly on the eyes in the 2D try-on.
  */
 export async function renderModelThumbnail(url: string, options: RenderOptions = {}): Promise<ModelThumbnail> {
-  const gltf = await gltfLoader().loadAsync(url);
-  const model = applyCalibration(gltf.scene, options.calibration);
+  const { scene: pristine, classification } = await loadPristine(url, options.calibration);
+  const model = cloneForLens(pristine);
   // The card should show what the customer will actually wear.
-  const lens = options.lens ? applyLensConfig(model, options.lens, { force: options.forceLens }) : undefined;
+  const lens = options.lens
+    ? applyLensConfigCached(model, classification, options.lens, { force: options.forceLens })
+    : undefined;
 
   const canvas = document.createElement("canvas");
 

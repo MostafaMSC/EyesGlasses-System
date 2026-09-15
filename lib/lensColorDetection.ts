@@ -60,9 +60,11 @@ const EDGE_THRESHOLD = 60;
 /** A grown region larger than this share of the front is a leak into the frame. */
 const MAX_REGION_SHARE = 0.4;
 const MIN_REGION_SHARE = 0.01;
-/** Bright and colourless: a highlight, not the glass. */
-const HIGHLIGHT_MIN_CHANNEL = 225;
+/** Bright and colourless: a highlight/glare, not the glass. ~0.85 luminance, per the desaturation guard. */
+const HIGHLIGHT_MIN_CHANNEL = 217;
 const HIGHLIGHT_MAX_SPREAD = 20;
+/** Luminance (0..255) below which a pixel reads as a dark rim/crease edge rather than lens material. ~0.15. */
+const DARK_EDGE_MAX_LUMINANCE = 38;
 /** Samples this close to the frame's own colour are rim, not lens. */
 const FRAME_TOLERANCE = 20;
 /** Share of highlight samples above which the lens is simply clear. */
@@ -91,6 +93,89 @@ function median(values: number[]): number {
 
 function medianColor(samples: RGB[]): RGB {
   return [median(samples.map((s) => s[0])), median(samples.map((s) => s[1])), median(samples.map((s) => s[2]))];
+}
+
+function rgbToHsv([r, g, b]: RGB): [number, number, number] {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const d = max - min;
+  const v = max;
+  const s = max === 0 ? 0 : d / max;
+  let h = 0;
+  if (d !== 0) {
+    if (max === rn) h = ((gn - bn) / d) % 6;
+    else if (max === gn) h = (bn - rn) / d + 2;
+    else h = (rn - gn) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return [h, s, v];
+}
+
+function hsvToRgb([h, s, v]: [number, number, number]): RGB {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let rp = 0;
+  let gp = 0;
+  let bp = 0;
+  if (h < 60) [rp, gp, bp] = [c, x, 0];
+  else if (h < 120) [rp, gp, bp] = [x, c, 0];
+  else if (h < 180) [rp, gp, bp] = [0, c, x];
+  else if (h < 240) [rp, gp, bp] = [0, x, c];
+  else if (h < 300) [rp, gp, bp] = [x, 0, c];
+  else [rp, gp, bp] = [c, 0, x];
+  return [(rp + m) * 255, (gp + m) * 255, (bp + m) * 255];
+}
+
+/**
+ * A colour representative of `samples`, computed in HSV rather than RGB:
+ * hue as a circular mean (plain numeric averaging breaks at the 0°/360°
+ * wrap — a set of samples split across that boundary would average toward
+ * the *opposite* hue), saturation and value as plain medians. Robust the
+ * same way `medianColor` is against a handful of outliers (a sliver of
+ * background bleed, a stray dark pixel), but immune to the hue distortion
+ * RGB averaging is prone to when two differently-lit patches of the same
+ * lens are combined.
+ */
+function medianColorHSV(samples: RGB[]): RGB {
+  if (samples.length === 0) return [255, 255, 255];
+  const hsv = samples.map(rgbToHsv);
+  let sx = 0;
+  let sy = 0;
+  for (const [h] of hsv) {
+    const rad = (h * Math.PI) / 180;
+    sx += Math.cos(rad);
+    sy += Math.sin(rad);
+  }
+  let hueDeg = (Math.atan2(sy, sx) * 180) / Math.PI;
+  if (hueDeg < 0) hueDeg += 360;
+  const s = median(hsv.map((c) => c[1]));
+  const v = median(hsv.map((c) => c[2]));
+  return hsvToRgb([hueDeg, s, v]);
+}
+
+/** Combines a handful of already-representative colours (e.g. one per lens) the same HSV-safe way. */
+function averageColorsHSV(colors: RGB[]): RGB {
+  if (colors.length <= 1) return colors[0] ?? [255, 255, 255];
+  const hsv = colors.map(rgbToHsv);
+  let sx = 0;
+  let sy = 0;
+  let sSum = 0;
+  let vSum = 0;
+  for (const [h, s, v] of hsv) {
+    const rad = (h * Math.PI) / 180;
+    sx += Math.cos(rad);
+    sy += Math.sin(rad);
+    sSum += s;
+    vSum += v;
+  }
+  let hueDeg = (Math.atan2(sy, sx) * 180) / Math.PI;
+  if (hueDeg < 0) hueDeg += 360;
+  return hsvToRgb([hueDeg, sSum / hsv.length, vSum / hsv.length]);
 }
 
 function toHex([r, g, b]: RGB): string {
@@ -344,26 +429,58 @@ function growRegion(px: Pixels, edges: Float32Array, seedX: number, seedY: numbe
   return { mask, area, box: { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }, cx: sx / area, cy: sy / area };
 }
 
-/** The region's pixels at least `iterations` steps from its boundary. */
-function erode(mask: Uint8Array, width: number, height: number, iterations: number): Uint8Array {
-  let current = mask;
-  for (let k = 0; k < iterations; k++) {
-    const next = new Uint8Array(current.length);
-    for (let y = 1; y < height - 1; y++) {
-      for (let x = 1; x < width - 1; x++) {
-        const i = y * width + x;
-        if (current[i] && current[i - 1] && current[i + 1] && current[i - width] && current[i + width]) next[i] = 1;
-      }
+/** ROI erosion depth for colour sampling: inward from the region's own extent, toward its centroid. */
+const LENS_ROI_SHRINK = 0.18;
+const LENS_ROI_SHRINK_FALLBACK = 0.08;
+
+/**
+ * Keeps only the pixels of `region` inside an ellipse shrunk `fraction`
+ * inward from the region's own bounding box, anchored on its measured
+ * centroid (not the box's own centre, which an asymmetric lens shape can
+ * offset from the true middle).
+ *
+ * This is the ROI erosion step: the rim, a hinge shadow, and the fringing a
+ * colour-tolerant flood-fill leaves at its own boundary all live in this
+ * outer 15-20%, so sampling only pulls from the interior. An ellipse rather
+ * than a per-pixel morphological erosion, because it shrinks toward the
+ * lens's *centre* uniformly regardless of the region's outline — a thin
+ * neck or notch in the grown mask can't leave a contaminated sliver
+ * standing the way boundary-only erosion sometimes does.
+ */
+function shrinkTowardCenter(region: Region, width: number, height: number, fraction: number): Uint8Array {
+  const rx = Math.max(1, (region.box.w / 2) * (1 - fraction));
+  const ry = Math.max(1, (region.box.h / 2) * (1 - fraction));
+  const out = new Uint8Array(width * height);
+  const x0 = Math.max(0, region.box.x);
+  const x1 = Math.min(width, region.box.x + region.box.w);
+  const y0 = Math.max(0, region.box.y);
+  const y1 = Math.min(height, region.box.y + region.box.h);
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = y * width + x;
+      if (!region.mask[i]) continue;
+      const dx = (x - region.cx) / rx;
+      const dy = (y - region.cy) / ry;
+      if (dx * dx + dy * dy <= 1) out[i] = 1;
     }
-    current = next;
   }
-  return current;
+  return out;
+}
+
+function countSet(mask: Uint8Array): number {
+  let n = 0;
+  for (let i = 0; i < mask.length; i++) n += mask[i];
+  return n;
 }
 
 function isHighlight([r, g, b]: RGB): boolean {
   const min = Math.min(r, g, b);
   const max = Math.max(r, g, b);
   return min >= HIGHLIGHT_MIN_CHANNEL && max - min <= HIGHLIGHT_MAX_SPREAD;
+}
+
+function isDarkEdge(rgb: RGB): boolean {
+  return luminance(rgb) < DARK_EDGE_MAX_LUMINANCE;
 }
 
 function failure(reason: string, analysed: { width: number; height: number }): DetectedLensColor {
@@ -489,17 +606,18 @@ export function detectLensColorFromPixels(data: Uint8ClampedArray, width: number
   let highlightShare = 0;
   let keptShare = 1;
   for (const region of valid) {
-    const inset = Math.min(12, Math.max(1, Math.round(region.box.w * 0.1)));
-    let interior = erode(region.mask, width, height, inset);
-    let count = 0;
-    for (let i = 0; i < interior.length; i++) count += interior[i];
-    if (count < 50) interior = erode(region.mask, width, height, 1);
+    // Erode 18% inward toward the lens's own centroid; fall back to a
+    // shallower shrink, then the raw grown region, if that leaves too few
+    // pixels (a small lens in a downscaled photo).
+    let interior = shrinkTowardCenter(region, width, height, LENS_ROI_SHRINK);
+    if (countSet(interior) < 50) interior = shrinkTowardCenter(region, width, height, LENS_ROI_SHRINK_FALLBACK);
+    if (countSet(interior) < 20) interior = region.mask;
 
     const all: RGB[] = [];
     for (let i = 0; i < interior.length; i++) if (interior[i]) all.push(px.rgb(i));
     const highlights = all.filter(isHighlight).length;
     highlightShare = Math.max(highlightShare, highlights / Math.max(1, all.length));
-    let kept = all.filter((s) => !isHighlight(s));
+    let kept = all.filter((s) => !isHighlight(s) && !isDarkEdge(s));
     if (frameColor) {
       const notRim = kept.filter((s) => distance(s, frameColor) > FRAME_TOLERANCE);
       // A black frame with a near-black lens would lose everything here;
@@ -507,7 +625,7 @@ export function detectLensColorFromPixels(data: Uint8ClampedArray, width: number
       if (notRim.length >= kept.length * 0.5) kept = notRim;
     }
     keptShare = Math.min(keptShare, kept.length / Math.max(1, all.length));
-    if (kept.length >= 20) perSide.push(medianColor(kept));
+    if (kept.length >= 20) perSide.push(medianColorHSV(kept));
   }
 
   const reference: RGB = backdrop && luminance(backdrop) >= 160 ? backdrop : [255, 255, 255];
@@ -524,7 +642,11 @@ export function detectLensColorFromPixels(data: Uint8ClampedArray, width: number
   }
 
   // --- The answer, and how far to trust it -----------------------------
-  const color: RGB = perSide.length === 2 ? [0, 1, 2].map((c) => (perSide[0][c] + perSide[1][c]) / 2) as RGB : perSide[0];
+  // Combined in HSV, not a per-channel RGB average: a left lens caught in
+  // slightly warmer light and a right lens in cooler light can average, in
+  // RGB, toward a hue neither side actually has. The circular hue mean used
+  // here can't do that.
+  const color: RGB = averageColorsHSV(perSide);
   const darkening = Math.min(1, Math.max(0, 1 - luminance(color) / Math.max(1, luminance(reference))));
   const tintStrength = Math.round(Math.min(TINT_MAX, Math.max(TINT_BASE, TINT_BASE + TINT_SLOPE * darkening)) * 100) / 100;
 
