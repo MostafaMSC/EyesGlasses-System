@@ -307,9 +307,18 @@ export class TryOnScene {
     const w = head.faceWidthCm;
     this.mask.scale.set(HEAD_MASK.halfWidth * w, HEAD_MASK.halfHeight * w, HEAD_MASK.halfDepth * w);
     this.mask.position.set(0, HEAD_MASK.centreY * w, -HEAD_MASK.centreBack * w);
-    // The cut: keep only what lies behind (local -Z of) the clearance plane.
-    // Clipping planes are world-space, so the plane follows the head each frame.
-    this.scratch.set(0, 0, -1).applyQuaternion(head.quaternion);
+    // The cut: discard the sliver of the mask in front of the clearance
+    // plane (toward the face — where it must never occlude the rim/bridge),
+    // keep everything behind it (the skull volume the far temple arm
+    // actually needs to disappear behind).
+    //
+    // Three.js discards fragments on the side its `normal` points to, so
+    // that normal has to point *toward the face* (local +Z — mixing this up
+    // silently inverts the whole mask: it then keeps only a useless front
+    // sliver and discards the skull volume, so nothing ever occludes the
+    // far arm). Clipping planes are world-space, so the plane is rebuilt
+    // from the head's current rotation every frame.
+    this.scratch.set(0, 0, 1).applyQuaternion(head.quaternion);
     this.scratchPoint.set(0, 0, -HEAD_MASK.frontClearance * w).applyQuaternion(head.quaternion).add(head.anchor);
     this.maskClip.setFromNormalAndCoplanarPoint(this.scratch, this.scratchPoint);
   }
