@@ -88,18 +88,36 @@ export const HEAD_CALIBRATION = {
    */
   frontalExponent: 6,
   /**
-   * Angular speed (rad/s) at which a frame's weight halves, 1 / (1 + (ω/ω0)²).
+   * Angular speed (rad/s) at which a frame's weight halves, 1 / (1 + (ω/ω0)⁴).
    * The pose matrix is smoothed, so while the head is moving it lags the live
    * landmarks and the head-space lift is skewed (real webcam: span error 26%
    * on frames with >12° of motion between detections vs 2–5% otherwise).
+   * The fourth power makes it close to a gate: a still head counts fully, a
+   * head turning at twice ω0 almost not at all.
    */
   motionRadPerSecond: 0.6,
+  /**
+   * The very first frame has no previous pose to measure motion against, and
+   * frames right after a face is (re)acquired are often mid-movement. Its
+   * weight is scaled by this until motion is known.
+   */
+  unknownMotionWeight: 0.25,
+  /**
+   * Early on the estimate is a weighted median of the first samples (up to
+   * `warmupSamples`), so one or two bad opening frames cannot set the size;
+   * after that it is a running mean. The glasses are not placed until this
+   * many usable observations exist.
+   */
+  warmupSamples: 9,
+  /** A frame must carry at least this weight to count as reference (facing-camera) evidence. */
+  minimumReferenceFrameWeight: 0.1,
+  minimumObservations: 3,
   /**
    * Accumulated weight needed before the glasses are placed at all, so the
    * very first frame (often partly in view or mid-turn) never sets a visible
    * wrong size.
    */
-  minimumWeight: 0.2,
+  minimumWeight: 0.6,
   /** Applied values approach their target with this time constant. */
   applyTauSeconds: 0.45,
   /** A value may not change by more than this fraction of the lens span per second. */
@@ -188,12 +206,25 @@ export interface HeadFrame {
   measurement: HeadMeasurement;
 }
 
-/** Confidence-weighted running mean that turns into a slow follower once warm. */
+/**
+ * Confidence-weighted estimate. For its first `warmupSamples` observations it
+ * is the weighted median (robust to a bad opening frame or two); from then on
+ * a weighted running mean that turns into a slow follower once warm.
+ */
 class Running {
   value = 0;
   weight = 0;
+  count = 0;
+  private warm: { x: number; w: number }[] = [];
   observe(x: number, w: number) {
     if (!(w > 0)) return;
+    this.count++;
+    if (this.warm.length < HEAD_CALIBRATION.warmupSamples) {
+      this.warm.push({ x, w });
+      this.weight = Math.min(this.weight + w, HEAD_CALIBRATION.weightCap);
+      this.value = weightedMedian(this.warm);
+      return;
+    }
     const total = Math.min(this.weight, HEAD_CALIBRATION.weightCap) + w;
     this.value += (x - this.value) * (w / total);
     this.weight = Math.min(this.weight + w, HEAD_CALIBRATION.weightCap);
@@ -201,7 +232,21 @@ class Running {
   reset() {
     this.value = 0;
     this.weight = 0;
+    this.count = 0;
+    this.warm.length = 0;
   }
+}
+
+function weightedMedian(samples: { x: number; w: number }[]): number {
+  const sorted = [...samples].sort((a, b) => a.x - b.x);
+  let total = 0;
+  for (const s of sorted) total += s.w;
+  let acc = 0;
+  for (const s of sorted) {
+    acc += s.w;
+    if (acc >= total / 2) return s.x;
+  }
+  return sorted[sorted.length - 1].x;
 }
 
 /**
@@ -222,6 +267,10 @@ class Estimate {
   get weight() {
     return this.any.weight;
   }
+  /** Number of usable observations behind the fallback estimate. */
+  get count() {
+    return this.any.count;
+  }
   /** Weight of reliable evidence only. */
   get reliableWeight() {
     return this.reference.weight;
@@ -231,7 +280,9 @@ class Estimate {
   }
   observe(x: number, w: number, reliable: boolean) {
     this.any.observe(x, w);
-    if (reliable) this.reference.observe(x, w);
+    // A frame that was barely trusted (moving, or the uncertain first one)
+    // is not reliable evidence however it is posed.
+    if (reliable && w >= HEAD_CALIBRATION.minimumReferenceFrameWeight) this.reference.observe(x, w);
   }
   reset() {
     this.any.reset();
@@ -473,7 +524,9 @@ export class HeadFrameTracker {
       const dtPose = MathUtils.clamp((input.timestampMs - this.prevPoseTime) / 1000, 1 / 240, 0.25);
       const angle = 2 * Math.acos(Math.min(1, Math.abs(f.quaternion.dot(this.prevQuaternion))));
       const omega = angle / dtPose;
-      quality /= 1 + (omega / HEAD_CALIBRATION.motionRadPerSecond) ** 2;
+      quality /= 1 + (omega / HEAD_CALIBRATION.motionRadPerSecond) ** 4;
+    } else {
+      quality *= HEAD_CALIBRATION.unknownMotionWeight;
     }
     this.prevQuaternion.copy(f.quaternion);
     this.prevPoseTime = input.timestampMs;
@@ -519,7 +572,7 @@ export class HeadFrameTracker {
 
     // Nothing trustworthy seen yet (e.g. the face started cut off): wait,
     // rather than place the glasses from a bad measurement.
-    if (!(this.span.weight >= HEAD_CALIBRATION.minimumWeight)) {
+    if (!(this.span.weight >= HEAD_CALIBRATION.minimumWeight) || this.span.count < HEAD_CALIBRATION.minimumObservations) {
       f.state = "searching";
       f.confidence = 0;
       return false;

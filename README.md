@@ -445,6 +445,12 @@ geometry instead, in `lib/threeTryOn/`:
    confidence stays at 0 however many turned frames arrive, and the try-on
    asks the person to face the camera if that lasts more than ~1 s
    (`VirtualTryOnModal`). The glasses are never scaled up to compensate.
+   A start is protected the same way: the first frames after a face appears
+   are often mid-movement, so each estimate begins as a weighted *median* of its
+   first samples, the first frame (no motion known yet) counts for a quarter,
+   and the glasses are not placed until enough trustworthy weight exists
+   (a clean start takes ~30 ms; a start while moving waits until the head
+   settles, typically 0.2 s) — instead of appearing too small and growing.
    (Measured centimetres are in MediaPipe's canonical head units — the
    proportions are right, the absolute scale is relative to the camera model.)
 4. **Occlusion** uses depth-only (`colorWrite: false`) geometry
