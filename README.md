@@ -446,11 +446,13 @@ geometry instead, in `lib/threeTryOn/`:
    asks the person to face the camera if that lasts more than ~1 s
    (`VirtualTryOnModal`). The glasses are never scaled up to compensate.
    A start is protected the same way: the first frames after a face appears
-   are often mid-movement, so each estimate begins as a weighted *median* of its
-   first samples, the first frame (no motion known yet) counts for a quarter,
-   and the glasses are not placed until enough trustworthy weight exists
-   (a clean start takes ~30 ms; a start while moving waits until the head
-   settles, typically 0.2 s) — instead of appearing too small and growing.
+   are often mid-movement or noisy, so each estimate begins as a weighted
+   *median* of its first samples, the first frame (no motion known yet) counts
+   for a quarter, and the glasses are not placed until 5 *distinct* camera
+   frames exist (~120 ms on a fast camera, ~0.4 s on a phone in dim light) —
+   instead of appearing too large or small and then correcting. A frame that is
+   bit-for-bit the previous one (the loop runs faster than a phone camera
+   delivers) is ignored, so repeats are never counted as evidence.
    (Measured centimetres are in MediaPipe's canonical head units — the
    proportions are right, the absolute scale is relative to the camera model.)
 4. **Occlusion** uses depth-only (`colorWrite: false`) geometry

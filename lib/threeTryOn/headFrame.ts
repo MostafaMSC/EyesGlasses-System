@@ -106,12 +106,14 @@ export const HEAD_CALIBRATION = {
    * Early on the estimate is a weighted median of the first samples (up to
    * `warmupSamples`), so one or two bad opening frames cannot set the size;
    * after that it is a running mean. The glasses are not placed until this
-   * many usable observations exist.
+   * many usable, *distinct* observations exist (a phone camera in dim light
+   * delivers ~11 fps while the loop runs faster, so the same camera frame
+   * arrives several times — see `isRepeatOfLastFrame`).
    */
   warmupSamples: 9,
   /** A frame must carry at least this weight to count as reference (facing-camera) evidence. */
   minimumReferenceFrameWeight: 0.1,
-  minimumObservations: 3,
+  minimumObservations: 5,
   /**
    * Accumulated weight needed before the glasses are placed at all, so the
    * very first frame (often partly in view or mid-turn) never sets a visible
@@ -366,6 +368,9 @@ export class HeadFrameTracker {
   // Previous head rotation, for the angular speed that down-weights moving frames.
   private prevQuaternion = new Quaternion();
   private prevPoseTime: number | null = null;
+  // Landmark signature of the previous call, to recognise the same camera frame arriving again.
+  private prevSignature = new Float64Array(9);
+  private hasPrevSignature = false;
 
   private scale = new Vector3();
   private inverseRotation = new Quaternion();
@@ -386,8 +391,30 @@ export class HeadFrameTracker {
     this.lastTimestamp = null;
     this.outlierRun = 0;
     this.prevPoseTime = null;
+    this.hasPrevSignature = false;
     this.frame.state = "searching";
     this.frame.confidence = 0;
+  }
+
+  /**
+   * True when these landmarks are bit-for-bit those of the previous call: the
+   * camera has not produced a new frame yet, so there is nothing new to learn
+   * from it. Counting such repeats as fresh observations would make a single
+   * noisy measurement look like settled evidence.
+   */
+  private isRepeatOfLastFrame(lm: ReadonlyArray<NormalizedPoint>): boolean {
+    const keys = [LM.noseBridge, LM.leftEyeOuter, LM.rightEyeOuter] as const;
+    let same = this.hasPrevSignature;
+    for (let k = 0; k < keys.length; k++) {
+      const p = lm[keys[k]];
+      const x = p.x, y = p.y, z = p.z ?? 0;
+      if (same && (this.prevSignature[k * 3] !== x || this.prevSignature[k * 3 + 1] !== y || this.prevSignature[k * 3 + 2] !== z)) same = false;
+      this.prevSignature[k * 3] = x;
+      this.prevSignature[k * 3 + 1] = y;
+      this.prevSignature[k * 3 + 2] = z;
+    }
+    this.hasPrevSignature = true;
+    return same;
   }
 
   /** Lifts landmark `i` into camera space, then head space, writing into `out`. */
@@ -530,6 +557,9 @@ export class HeadFrameTracker {
     }
     this.prevQuaternion.copy(f.quaternion);
     this.prevPoseTime = input.timestampMs;
+
+    // The same camera frame again carries no new evidence.
+    if (this.isRepeatOfLastFrame(lm)) quality = 0;
 
     // A reliable observation: facing the camera closely enough that the
     // head-space lift is trustworthy (see `reliableYawDeg`).
