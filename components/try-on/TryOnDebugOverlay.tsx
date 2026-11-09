@@ -13,13 +13,14 @@ import { LM } from "@/lib/threeTryOn/headFrame";
  * Turned on with `?tryOnDebug=1` on any page, or
  * `localStorage.setItem("tryOnDebug", "1")`. Never mounted otherwise.
  */
-export function isTryOnDebugEnabled(): boolean {
-  if (typeof window === "undefined") return false;
+export function isTryOnDebugEnabled(): number {
+  if (typeof window === "undefined") return 0;
   try {
-    if (new URLSearchParams(window.location.search).get("tryOnDebug") === "1") return true;
-    return window.localStorage.getItem("tryOnDebug") === "1";
+    const raw = new URLSearchParams(window.location.search).get("tryOnDebug") ?? window.localStorage.getItem("tryOnDebug");
+    // 1: numbers and landmarks. 2: also tint the head occluders.
+    return raw === "2" ? 2 : raw === "1" ? 1 : 0;
   } catch {
-    return false;
+    return 0;
   }
 }
 
@@ -84,9 +85,19 @@ export function TryOnDebugOverlay({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, rect.width, rect.height);
       if (!info || !info.visible) {
-        if (textRef.current) textRef.current.textContent = "no face";
+        if (textRef.current) {
+          textRef.current.textContent = "no face";
+          textRef.current.dataset.json = "";
+        }
         return;
       }
+      // Machine-readable copy of the same numbers, for the automated checks
+      // (the head mesh is left out of the JSON — it is large — and reachable
+      // as `window.__tryOnDebug.headMesh`).
+      if (textRef.current) {
+        textRef.current.dataset.json = JSON.stringify(info, (key, value) => (key === "headMesh" ? undefined : value));
+      }
+      (window as unknown as { __tryOnDebug?: unknown }).__tryOnDebug = info;
       ctx.font = "bold 11px ui-monospace, monospace";
       for (const [index, point] of Object.entries(info.landmarks)) {
         dot(point.u, point.v, "#38bdf8", LANDMARK_LABEL[Number(index)]);
@@ -103,9 +114,11 @@ export function TryOnDebugOverlay({
         const [rx, ry, rz] = info.rotationDeg;
         textRef.current.textContent = [
           `yaw ${info.yawDeg.toFixed(1)}°  pitch ${info.pitchDeg.toFixed(1)}°  roll ${info.rollDeg.toFixed(1)}°`,
-          `IPD(outer) ${info.ipdCm.toFixed(1)} cm  lens span ${info.lensSpanCm.toFixed(2)} cm  ${info.calibrated ? "calibrated" : "calibrating…"}`,
-          `frame width ${info.frameWidthCm.toFixed(1)} cm  face width ${info.faceWidthCm.toFixed(1)} cm  distance ${info.distanceCm.toFixed(0)} cm`,
-          `model scale ${info.modelScale.toFixed(4)}`,
+          `calibration ${info.calibrationState} (${Math.round(info.calibrationConfidence * 100)}%)  frame quality ${info.quality.toFixed(2)}`,
+          `lens span ${info.lensSpanCm.toFixed(2)} cm (this frame ${info.lensSpanRawCm.toFixed(2)})  outer eyes ${info.ipdCm.toFixed(1)}`,
+          `face width ${info.faceWidthCm.toFixed(1)} cm (this frame ${info.faceWidthRawCm.toFixed(1)})  frame ${info.frameWidthCm.toFixed(1)} cm`,
+          `distance ${info.distanceCm.toFixed(0)} cm  model scale ${info.modelScale.toFixed(4)}  matrix scale ${info.matrixScale.toFixed(3)}`,
+          `face mesh fitted between the arms at ${info.occluderFit.toFixed(2)}x`,
           `position ${px.toFixed(1)}, ${py.toFixed(1)}, ${pz.toFixed(1)} cm`,
           `rotation x ${rx.toFixed(1)}  y ${ry.toFixed(1)}  z ${rz.toFixed(1)}`,
           "axes: red = head right, green = up, blue = forward",
@@ -121,12 +134,14 @@ export function TryOnDebugOverlay({
     <>
       <canvas
         ref={canvasRef}
+        data-debug-overlay
         className="pointer-events-none absolute"
         style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
       />
       {/* Counter-mirrored so the numbers read left to right. */}
       <pre
         ref={textRef}
+        data-debug-overlay
         dir="ltr"
         className="pointer-events-none absolute left-2 top-2 rounded-lg bg-black/70 p-2 text-left font-mono text-[10px] leading-4 text-white"
         style={{ transform: "scaleX(-1)", transformOrigin: "center" }}

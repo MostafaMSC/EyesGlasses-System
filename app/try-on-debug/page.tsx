@@ -29,12 +29,7 @@ import { resolveLensConfig, type LensMode, type Product } from "@/data/products"
 import { lensLoadOptions, loadGlassesModel } from "@/lib/threeTryOn/glassesModel";
 import type { LensAnalysis } from "@/lib/threeTryOn/lensGeometry";
 import { computeFacePose, PitchCalibrator, type NormalizedPoint } from "@/lib/faceGeometry";
-import {
-  computeOverlayPlacement,
-  DEFAULT_OVERLAY_GEOMETRY,
-  overlayTransform,
-  selectSideOverlay,
-} from "@/lib/overlayPlacement";
+import { computeOverlayPlacement, overlayTransform, selectSideOverlay } from "@/lib/overlayPlacement";
 import { GlassesOverlay } from "@/components/try-on/GlassesOverlay";
 import { GlassesOverlay3D, type GlassesOverlay3DHandle } from "@/components/try-on/GlassesOverlay3D";
 import { MEDIAPIPE_VERTICAL_FOV_DEG } from "@/lib/threeTryOn/faceMatrix";
@@ -42,7 +37,6 @@ import { MEDIAPIPE_VERTICAL_FOV_DEG } from "@/lib/threeTryOn/faceMatrix";
 const VIDEO_W = 640;
 const VIDEO_H = 480;
 
-const LENS_SPAN_FRAC = DEFAULT_OVERLAY_GEOMETRY.lensRightX - DEFAULT_OVERLAY_GEOMETRY.lensLeftX;
 /** Assumed real temple-to-temple width, to put the synthetic head at a believable distance. */
 const FACE_WIDTH_CM = 14;
 
@@ -243,10 +237,6 @@ export default function TryOnDebugPage() {
       matrixData: { rows: 4, columns: 4, data: matrix.toArray() },
       timestampMs: 0,
       landmarks,
-      anchorU: pose.anchorX / VIDEO_W,
-      anchorV: pose.anchorY / VIDEO_H,
-      projectedLensSpanFrac: (pose.projectedWidth * LENS_SPAN_FRAC) / VIDEO_W,
-      faceWidthFrac,
       scale: product.tryOn.scale,
       offsetX: product.tryOn.offsetX,
       offsetY: product.tryOn.offsetY,

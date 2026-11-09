@@ -38,6 +38,8 @@ export interface GlassesOverlay3DHandle {
   captureCanvas(): HTMLCanvasElement | null;
   /** The last frame's measurements, when `debug` is on. Same object every call. */
   debugInfo(): TryOnDebugInfo | null;
+  /** How trustworthy the current fit is (null before the scene exists). */
+  fit(): ReturnType<TryOnScene["fit"]> | null;
 }
 
 export const GlassesOverlay3D = forwardRef<
@@ -47,10 +49,13 @@ export const GlassesOverlay3D = forwardRef<
     rect: OverlayRect | null;
     /** Overrides the product's own lens handling — for the debug harness. */
     loadOptions?: LoadOptions;
-    /** Collect the per-frame measurements the development overlay draws. */
-    debug?: boolean;
+    /**
+     * Development view level: 0 off, 1 collect the measurements the debug
+     * overlay draws, 2 also tint the occluders so their boundaries can be judged.
+     */
+    debug?: number;
   }
->(function GlassesOverlay3D({ product, rect, loadOptions: loadOptionsOverride, debug = false }, ref) {
+>(function GlassesOverlay3D({ product, rect, loadOptions: loadOptionsOverride, debug = 0 }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<TryOnScene | null>(null);
   /** Models we built ourselves and must dispose; cached GLBs are shared. */
@@ -137,7 +142,10 @@ export const GlassesOverlay3D = forwardRef<
   }, [rect]);
 
   useEffect(() => {
-    if (sceneRef.current) sceneRef.current.collectDebug = debug;
+    const scene = sceneRef.current;
+    if (!scene) return;
+    scene.collectDebug = debug > 0;
+    scene.setOccluderVisible(debug >= 2);
   }, [debug]);
 
   useImperativeHandle(
@@ -159,6 +167,9 @@ export const GlassesOverlay3D = forwardRef<
       debugInfo() {
         const scene = sceneRef.current;
         return scene?.collectDebug ? scene.debug : null;
+      },
+      fit() {
+        return sceneRef.current?.fit() ?? null;
       },
     }),
     []

@@ -24,7 +24,92 @@ export interface GlassesModel {
   height: number;
   /** What the lens pass found and did. Absent for the procedural placeholder. */
   lens?: LensProcessingResult;
+  /** How wide the gap between the temple arms is, front to back. Null when it can't be measured. */
+  arms: ArmProfile | null;
   dispose(): void;
+}
+
+/**
+ * The space between a frame's temple arms, measured from its geometry: for
+ * `ARM_BINS` equal slices running from just behind the rims (`zStart`) to the
+ * rear tip of the arms (`zEnd`), the smallest distance from the centre line to
+ * any arm vertex — i.e. the *inner* edge of the arms — in the model's own
+ * units. Glasses are worn with the head between the arms, so the head can
+ * never be wider than this at any depth; the occluders are held to it so they
+ * can't swallow an arm. Frames differ a lot here (many angle their arms
+ * inward), which is why it is measured rather than assumed.
+ */
+export interface ArmProfile {
+  /** Model-space z of the first slice (just behind the rims) and of the rear tip; both negative. */
+  zStart: number;
+  zEnd: number;
+  /** Inner half-width of the arms in each slice, front to back. */
+  half: Float32Array;
+}
+
+const ARM_BINS = 24;
+/** Arm vertices are the ones well out from the centre line; this keeps nose pads and bridge out. */
+const ARM_MIN_OFFSET = 0.3;
+/** Slices start this far behind the front plane, as a fraction of the model's width, to clear the rims. */
+const ARM_START = 0.1;
+
+/**
+ * Measures `ArmProfile` from a model already in the try-on convention (front
+ * facing +Z, arms back along -Z). `anchor` is the model-space point that will
+ * become the origin; slices are measured relative to it.
+ */
+function measureArmProfile(object: Object3D, box: Box3, size: Vector3, anchor: Vector3): ArmProfile | null {
+  const width = size.x;
+  const zStart = -ARM_START * width;
+  const zEnd = box.min.z - anchor.z;
+  // No arms to speak of: a frame without temples (or a model facing another way).
+  if (!(zEnd < zStart - 0.3 * width)) return null;
+
+  const half = new Float32Array(ARM_BINS).fill(Infinity);
+  const vertex = new Vector3();
+  const span = zStart - zEnd;
+  object.updateWorldMatrix(true, true);
+  object.traverse((node) => {
+    const mesh = node as Mesh;
+    if (!mesh.isMesh) return;
+    const position = mesh.geometry?.getAttribute("position");
+    if (!position) return;
+    for (let i = 0; i < position.count; i++) {
+      vertex.fromBufferAttribute(position, i).applyMatrix4(mesh.matrixWorld);
+      const dz = vertex.z - anchor.z;
+      if (dz > zStart || dz < zEnd) continue;
+      const dx = Math.abs(vertex.x - anchor.x);
+      if (dx < ARM_MIN_OFFSET * width) continue;
+      const bin = Math.min(ARM_BINS - 1, Math.floor(((zStart - dz) / span) * ARM_BINS));
+      if (dx < half[bin]) half[bin] = dx;
+    }
+  });
+
+  // Fill empty slices from their nearest measured neighbour.
+  let valid = 0;
+  for (let b = 0; b < ARM_BINS; b++) if (Number.isFinite(half[b])) valid++;
+  if (valid < ARM_BINS / 3) return null;
+  for (let b = 0; b < ARM_BINS; b++) {
+    if (Number.isFinite(half[b])) continue;
+    for (let d = 1; d < ARM_BINS; d++) {
+      const near = Number.isFinite(half[b - d]) ? half[b - d] : Number.isFinite(half[b + d]) ? half[b + d] : Infinity;
+      if (Number.isFinite(near)) {
+        half[b] = near;
+        break;
+      }
+    }
+  }
+  return { zStart, zEnd, half };
+}
+
+/** The arms' inner half-width at model-space `z` (negative behind the front plane), interpolated; NaN outside the arms. */
+export function armHalfWidthAt(profile: ArmProfile, z: number): number {
+  if (z > profile.zStart || z < profile.zEnd) return NaN;
+  const t = ((profile.zStart - z) / (profile.zStart - profile.zEnd)) * ARM_BINS - 0.5;
+  const lo = Math.max(0, Math.min(ARM_BINS - 1, Math.floor(t)));
+  const hi = Math.min(ARM_BINS - 1, lo + 1);
+  const f = Math.max(0, Math.min(1, t - lo));
+  return profile.half[lo] * (1 - f) + profile.half[hi] * f;
 }
 
 /**
@@ -126,6 +211,7 @@ export function buildFallbackModel(tryOn: TryOnConfig): GlassesModel {
     lensSpan: 1,
     width: size.x,
     height: size.y,
+    arms: null,
     dispose: () => disposeTree(root),
   };
 }
@@ -199,6 +285,10 @@ async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesMo
     box.max.z
   );
 
+  // Measured here too, before the lens pass and with the same anchor, so it is
+  // in the same units and frame the scene will place the model in.
+  const arms = measureArmProfile(scene, box, size, anchor);
+
   // Before anchoring: the lens surfaces are found relative to the model's
   // own bounding box, which anchoring shifts. Once per load, never per frame
   // — the result is cached with the model.
@@ -212,6 +302,7 @@ async function loadFromUrl(url: string, options: LoadOptions): Promise<GlassesMo
     width: size.x,
     height: size.y,
     lens,
+    arms,
     dispose: () => disposeTree(root),
   };
 }

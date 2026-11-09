@@ -9,6 +9,11 @@ export interface NormalizedPoint {
   x: number;
   y: number;
   z?: number;
+  /**
+   * MediaPipe's likelihood of the landmark being visible, when it reports one
+   * (0 or absent otherwise — the face model is not documented to fill it).
+   */
+  visibility?: number;
 }
 
 export interface FacePose {

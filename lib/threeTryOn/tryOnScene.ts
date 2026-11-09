@@ -5,14 +5,10 @@ import {
   Group,
   MathUtils,
   Matrix4,
-  Mesh,
-  MeshBasicMaterial,
   PMREMGenerator,
   PerspectiveCamera,
-  Plane,
   Scene,
   SRGBColorSpace,
-  SphereGeometry,
   Texture,
   Vector3,
   WebGLRenderer,
@@ -26,15 +22,16 @@ import {
   MEDIAPIPE_VERTICAL_FOV_DEG,
   type MediapipeMatrix,
 } from "@/lib/threeTryOn/faceMatrix";
-import { HEAD_MASK, HeadFrameTracker, LM, type HeadFrame } from "@/lib/threeTryOn/headFrame";
+import { FaceOccluder } from "@/lib/threeTryOn/faceOccluder";
+import { HeadFrameTracker, LM, type HeadFrame } from "@/lib/threeTryOn/headFrame";
 import type { GlassesModel } from "@/lib/threeTryOn/glassesModel";
 import type { NormalizedPoint } from "@/lib/faceGeometry";
 
 /**
  * Everything needed to place the frame for one video frame. Rotation and
  * depth come from MediaPipe's head-pose matrix; the landmarks say where on
- * that head the frame rests, and how big it is — measured while the head is
- * frontal and then held, see `HeadFrameTracker`.
+ * that head the frame rests and how big it is — measured in head space and
+ * calibrated progressively, see `HeadFrameTracker`.
  */
 export interface FaceFrameInput {
   /**
@@ -43,20 +40,10 @@ export interface FaceFrameInput {
    * of the main bundle for anyone who only ever uses the 2D overlay.
    */
   matrixData: MediapipeMatrix;
-  /** Frame timestamp, for the pose smoother. */
+  /** Frame timestamp, for the smoothers. */
   timestampMs: number;
   /** The face's landmarks, as MediaPipe returned them (normalised, with z). */
   landmarks: ReadonlyArray<NormalizedPoint>;
-  /** Lens-centre line, in normalized video coordinates (0..1, y down). */
-  anchorU: number;
-  anchorV: number;
-  /**
-   * Lens-centre span as it currently appears on screen, as a fraction of the
-   * video's width — foreshortening included (`FacePose.projectedWidth`).
-   */
-  projectedLensSpanFrac: number;
-  /** Temple-to-temple face width, as a fraction of the video's width. */
-  faceWidthFrac: number;
   /**
    * Per-product tuning: a size multiplier, offsets in frame widths / heights,
    * roll in degrees. Applied per frame, on top of the person's calibrated
@@ -67,6 +54,14 @@ export interface FaceFrameInput {
   offsetY: number;
   rollOffsetDeg: number;
 }
+
+/**
+ * A face missing for longer than this may be a different person, so the
+ * calibration is dropped. Shorter than this — a hand across the face, a
+ * glance away, a blink of lost tracking — it is kept, so the glasses come
+ * back exactly where they were instead of re-measuring and shifting.
+ */
+const LOSS_FORGET_MS = 4000;
 
 /** A point of interest projected back onto the video, for the debug overlay. */
 export interface DebugPoint {
@@ -88,46 +83,90 @@ export interface TryOnDebugInfo {
   yawDeg: number;
   pitchDeg: number;
   rollDeg: number;
-  /** Outer eye-corner distance and lens-centre span, centimetres. */
+  /** Outer eye corners (33↔263), 3D, in head space, centimetres. */
   ipdCm: number;
+  /** Calibrated (applied) values, centimetres. */
   lensSpanCm: number;
   frameWidthCm: number;
   faceWidthCm: number;
+  /** This frame's own raw measurements, centimetres. */
+  lensSpanRawCm: number;
+  faceWidthRawCm: number;
   modelScale: number;
   position: [number, number, number];
   rotationDeg: [number, number, number];
   distanceCm: number;
   calibrated: boolean;
+  calibrationState: string;
+  calibrationConfidence: number;
+  /** "frontal" when the fit rests on facing-the-camera frames, "turned" when only turned frames have been seen. */
+  calibrationBasis: string;
+  /** Whether this frame's pose counted as a reliable observation. */
+  frameReliable: boolean;
+  /** How much this frame contributed to calibration, 0..1, and the pose-independent part of that. */
+  quality: number;
+  landmarkQuality: number;
+  /** Lowest per-landmark visibility MediaPipe reported (1 when it reports none). */
+  visibilityMin: number;
+  matrixScale: number;
+  /** Projected anchor-to-pupil-midpoint distance, as a fraction of the outer-eye distance on screen. */
+  anchorToEyes: number;
+  /** A few landmarks in head space (x, y, z; this frame, unsmoothed), for checking proportions. */
+  headPoints: Record<number, [number, number, number]>;
+  /** Lateral scale applied to the face mesh so it fits between the frame's arms (1 = not narrowed). */
+  occluderFit: number;
+  /** This frame's landmarks in head space (xyz triples, `headMeshCount` valid) — the live array, not a copy. */
+  headMesh: Float32Array | null;
+  headMeshCount: number;
   visible: boolean;
 }
+
+/** Landmarks reported in `TryOnDebugInfo.headPoints`: nose tip, chin, forehead, ears, bridge, pupils. */
+const DEBUG_HEAD_POINTS = [1, 152, 10, 234, 454, 168, 468, 473, 33, 263] as const;
 
 /**
  * Owns the WebGL canvas that sits on top of the camera feed: a transparent
  * overlay, a camera whose intrinsics match the ones MediaPipe solved the head
- * pose against, the glasses model, and a depth-only head mask that gives the
- * temple arms somewhere to disappear behind.
+ * pose against, the glasses model, and the depth-only head the temple arms
+ * disappear behind.
+ *
+ * Scene graph — the head transform is the one parent of everything, so the
+ * glasses and the occluders turn as one rigid object:
+ *
+ *   head      positioned at the head origin, rotated with the pose
+ *   ├ occluder   face mesh + cranium, in head space
+ *   └ anchor     at the calibrated lens-centre point, in head space
+ *       └ frame    uniform scale + per-product offsets
+ *           └ model.root
  */
 export class TryOnScene {
   private renderer: WebGLRenderer;
   private scene = new Scene();
   private camera: PerspectiveCamera;
-  /** Follows the head: positioned at the lens line, rotated with the pose. */
+  private head = new Group();
   private anchor = new Group();
-  /** Holds the model, carrying only the fit scale and per-product offsets. */
   private frame = new Group();
-  private mask: Mesh;
+  private occluder = new FaceOccluder();
   private environment: Texture | null = null;
   private model: GlassesModel | null = null;
 
   private poseMatrix = new Matrix4();
   private poseSmoother = new FaceMatrixSmoother();
   private headFrame = new HeadFrameTracker();
-  private maskClip = new Plane();
+  private lostSince: number | null = null;
   private scratch = new Vector3();
-  private scratchPoint = new Vector3();
   private scratchEuler = new Euler();
 
-  /** Filled in by `update` whenever `debug` is set; read by the debug overlay. */
+  /**
+   * How trustworthy the current fit is — read by the UI to ask the person to
+   * face the camera while the fit is only provisional.
+   */
+  fit(): { state: HeadFrame["state"]; confidence: number; basis: HeadFrame["basis"] } {
+    const f = this.headFrame.frame;
+    return { state: f.state, confidence: f.confidence, basis: f.basis };
+  }
+
+  /** Filled in by `update` whenever `collectDebug` is set; read by the debug overlay. */
   readonly debug: TryOnDebugInfo = {
     landmarks: {},
     faceCentre: { u: 0, v: 0 },
@@ -143,11 +182,26 @@ export class TryOnScene {
     lensSpanCm: 0,
     frameWidthCm: 0,
     faceWidthCm: 0,
+    lensSpanRawCm: 0,
+    faceWidthRawCm: 0,
     modelScale: 0,
     position: [0, 0, 0],
     rotationDeg: [0, 0, 0],
     distanceCm: 0,
     calibrated: false,
+    calibrationState: "searching",
+    calibrationConfidence: 0,
+    calibrationBasis: "turned",
+    frameReliable: false,
+    quality: 0,
+    landmarkQuality: 0,
+    visibilityMin: 1,
+    matrixScale: 1,
+    anchorToEyes: 0,
+    headPoints: {},
+    occluderFit: 1,
+    headMesh: null,
+    headMeshCount: 0,
     visible: false,
   };
   /** Set by the overlay when the development view is on; costs nothing otherwise. */
@@ -163,13 +217,10 @@ export class TryOnScene {
     });
     this.renderer.setClearAlpha(0);
     this.renderer.outputColorSpace = SRGBColorSpace;
+    // The cranium is cut off with a clipping plane, see `FaceOccluder`.
+    this.renderer.localClippingEnabled = true;
 
-    this.camera = new PerspectiveCamera(
-      MEDIAPIPE_VERTICAL_FOV_DEG,
-      1,
-      MEDIAPIPE_NEAR,
-      MEDIAPIPE_FAR
-    );
+    this.camera = new PerspectiveCamera(MEDIAPIPE_VERTICAL_FOV_DEG, 1, MEDIAPIPE_NEAR, MEDIAPIPE_FAR);
 
     // Eyewear is mostly dark acetate or polished metal, and metal renders
     // black without something to reflect — a small baked room gives it
@@ -188,23 +239,11 @@ export class TryOnScene {
     fill.position.set(-0.6, -0.2, 0.7);
     this.scene.add(fill);
 
-    // Writes depth but no colour: it punches the glasses' own pixels away
-    // where the head is in front of them, while leaving the camera feed
-    // untouched (nothing is painted, so those pixels stay transparent).
-    // Clipped at the lens plane, see `placeMask`.
-    this.renderer.localClippingEnabled = true;
-    this.mask = new Mesh(
-      new SphereGeometry(1, 28, 20),
-      new MeshBasicMaterial({ colorWrite: false, clippingPlanes: [this.maskClip] })
-    );
-    // Drawn before the frame, so the frame's fragments are the ones tested
-    // against it.
-    this.mask.renderOrder = -1;
-    this.anchor.add(this.mask);
-
+    this.head.add(this.occluder.group);
     this.anchor.add(this.frame);
-    this.anchor.visible = false;
-    this.scene.add(this.anchor);
+    this.head.add(this.anchor);
+    this.head.visible = false;
+    this.scene.add(this.head);
   }
 
   /**
@@ -227,26 +266,35 @@ export class TryOnScene {
     if (model) this.frame.add(model.root);
   }
 
-  /** Hides the overlay without tearing anything down — used when tracking is lost. */
+  /** Shows the occluder tinted instead of invisible — for judging its boundaries. */
+  setOccluderVisible(on: boolean) {
+    this.occluder.setVisualize(on);
+  }
+
+  /**
+   * Hides the overlay when tracking is lost. The person's calibration is kept
+   * through a short loss and only dropped after `LOSS_FORGET_MS`.
+   */
   clearFace() {
-    this.anchor.visible = false;
+    this.head.visible = false;
     this.debug.visible = false;
     this.poseSmoother.reset();
-    // A new face (or the same one after a gap) is re-measured from scratch:
-    // the constants belong to a person, not to the session.
-    this.headFrame.reset();
+    this.occluder.reset();
+    const now = performance.now();
+    this.lostSince ??= now;
+    if (now - this.lostSince > LOSS_FORGET_MS) this.headFrame.reset();
   }
 
   /** Returns false when the frame couldn't be placed, so the caller can react. */
   update(input: FaceFrameInput): boolean {
     if (!this.model) {
-      this.anchor.visible = false;
+      this.head.visible = false;
       return false;
     }
 
     const matrix = this.poseMatrix;
     if (!faceMatrixToThree(input.matrixData, matrix)) {
-      this.anchor.visible = false;
+      this.head.visible = false;
       return false;
     }
     this.poseSmoother.smooth(matrix, input.timestampMs);
@@ -254,37 +302,35 @@ export class TryOnScene {
     const placed = this.headFrame.update({
       matrix,
       landmarks: input.landmarks,
-      anchorU: input.anchorU,
-      anchorV: input.anchorV,
-      projectedLensSpanFrac: input.projectedLensSpanFrac,
-      faceWidthFrac: input.faceWidthFrac,
       verticalFovDeg: this.camera.fov,
       aspect: this.camera.aspect,
+      timestampMs: input.timestampMs,
     });
     if (!placed) {
-      this.anchor.visible = false;
+      this.head.visible = false;
       return false;
     }
-    const head = this.headFrame.frame;
+    this.lostSince = null;
+    const h = this.headFrame.frame;
 
-    // The rigid attachment: the anchor group *is* the head frame, placed at
-    // the nose bridge. Everything inside it — frame, offsets, mask — is in
-    // head space and turns with the head as one object.
-    this.anchor.position.copy(head.anchor);
-    this.anchor.quaternion.copy(head.quaternion);
+    // The head transform: parent of the glasses and both occluders.
+    this.head.position.copy(h.origin);
+    this.head.quaternion.copy(h.quaternion);
+    this.anchor.position.copy(h.anchorOffset);
 
-    // One uniform scale, from a calibrated width in centimetres: the model's
-    // lens span becomes the person's. Never per-axis, so the frame can't
-    // stretch as the head turns — perspective alone changes its on-screen size.
-    const scale = this.model.lensSpan > 0 ? (head.lensSpanCm * input.scale) / this.model.lensSpan : 0;
+    // One uniform scale, from the calibrated lens span in centimetres: the
+    // model's lens span becomes the person's. Never per-axis, so the frame
+    // can't stretch as the head turns — perspective alone changes its
+    // on-screen size.
+    const scale = this.model.lensSpan > 0 ? (h.lensSpanCm * input.scale) / this.model.lensSpan : 0;
     if (!(scale > 0) || !Number.isFinite(scale)) {
-      this.anchor.visible = false;
+      this.head.visible = false;
       return false;
     }
     this.frame.scale.setScalar(scale);
 
     // Offsets are in frame widths/heights, matching the 2D path's units, and
-    // are applied inside the anchor so they follow the head's tilt.
+    // are applied inside the head frame so they follow the head's tilt.
     this.frame.position.set(
       input.offsetX * this.model.width * scale,
       -input.offsetY * this.model.height * scale,
@@ -292,35 +338,21 @@ export class TryOnScene {
     );
     this.frame.rotation.set(0, 0, MathUtils.DEG2RAD * input.rollOffsetDeg);
 
-    this.placeMask(head);
+    if (this.collectDebug) {
+      const parts = (window as unknown as { __tryOnOccluders?: string }).__tryOnOccluders;
+      this.occluder.parts = parts === "face" || parts === "cranium" || parts === "none" ? parts : "both";
+      this.occluder.tune = (window as unknown as { __tryOnTune?: { inset?: number; backoff?: number } }).__tryOnTune ?? null;
+    }
+    this.occluder.update(
+      h,
+      this.model.width * scale,
+      h.measurement.landmarkQuality > 0,
+      this.model.arms ? { profile: this.model.arms, scale } : null
+    );
 
-    this.anchor.visible = true;
-    if (this.collectDebug) this.fillDebug(input, head, scale);
+    this.head.visible = true;
+    if (this.collectDebug) this.fillDebug(input, h, scale);
     return true;
-  }
-
-  /**
-   * The head mask in head space: a skull-sized ellipsoid behind the nose
-   * bridge (the anchor group's origin), cut off at a plane behind the lenses.
-   */
-  private placeMask(head: HeadFrame) {
-    const w = head.faceWidthCm;
-    this.mask.scale.set(HEAD_MASK.halfWidth * w, HEAD_MASK.halfHeight * w, HEAD_MASK.halfDepth * w);
-    this.mask.position.set(0, HEAD_MASK.centreY * w, -HEAD_MASK.centreBack * w);
-    // The cut: discard the sliver of the mask in front of the clearance
-    // plane (toward the face — where it must never occlude the rim/bridge),
-    // keep everything behind it (the skull volume the far temple arm
-    // actually needs to disappear behind).
-    //
-    // Three.js discards fragments on the side its `normal` points to, so
-    // that normal has to point *toward the face* (local +Z — mixing this up
-    // silently inverts the whole mask: it then keeps only a useless front
-    // sliver and discards the skull volume, so nothing ever occludes the
-    // far arm). Clipping planes are world-space, so the plane is rebuilt
-    // from the head's current rotation every frame.
-    this.scratch.set(0, 0, 1).applyQuaternion(head.quaternion);
-    this.scratchPoint.set(0, 0, -HEAD_MASK.frontClearance * w).applyQuaternion(head.quaternion).add(head.anchor);
-    this.maskClip.setFromNormalAndCoplanarPoint(this.scratch, this.scratchPoint);
   }
 
   /** Projects a camera-space point to normalised video coordinates (y down). */
@@ -330,7 +362,7 @@ export class TryOnScene {
     out.v = (1 - this.scratch.y) / 2;
   }
 
-  private fillDebug(input: FaceFrameInput, head: HeadFrame, scale: number) {
+  private fillDebug(input: FaceFrameInput, h: HeadFrame, scale: number) {
     const d = this.debug;
     const lm = input.landmarks;
     for (const index of [LM.noseBridge, LM.noseTop, LM.leftEyeOuter, LM.rightEyeOuter, LM.leftTemple, LM.rightTemple]) {
@@ -354,36 +386,57 @@ export class TryOnScene {
       d.faceCentre.u = (templeL.x + templeR.x) / 2;
       d.faceCentre.v = (forehead.y + chin.y) / 2;
     }
-    this.project(head.anchor, d.anchor);
+    this.project(h.anchor, d.anchor);
     const axisLength = 3;
-    this.scratch.set(axisLength, 0, 0).applyQuaternion(head.quaternion).add(head.anchor);
+    this.scratch.set(axisLength, 0, 0).applyQuaternion(h.quaternion).add(h.anchor);
     this.project(this.scratch, d.axisRight);
-    this.scratch.set(0, axisLength, 0).applyQuaternion(head.quaternion).add(head.anchor);
+    this.scratch.set(0, axisLength, 0).applyQuaternion(h.quaternion).add(h.anchor);
     this.project(this.scratch, d.axisUp);
-    this.scratch.set(0, 0, axisLength).applyQuaternion(head.quaternion).add(head.anchor);
+    this.scratch.set(0, 0, axisLength).applyQuaternion(h.quaternion).add(h.anchor);
     this.project(this.scratch, d.axisForward);
 
-    d.yawDeg = head.yawDeg;
-    d.pitchDeg = head.pitchDeg;
-    d.rollDeg = head.rollDeg;
-    d.lensSpanCm = head.lensSpanCm;
-    d.faceWidthCm = head.faceWidthCm;
+    d.yawDeg = h.yawDeg;
+    d.pitchDeg = h.pitchDeg;
+    d.rollDeg = h.rollDeg;
+    d.ipdCm = h.measurement.outerEyeCm;
+    d.lensSpanCm = h.lensSpanCm;
+    d.faceWidthCm = h.faceWidthCm;
+    d.lensSpanRawCm = h.measurement.lensSpanCm;
+    d.faceWidthRawCm = h.measurement.faceWidthCm;
     d.frameWidthCm = this.model ? this.model.width * scale : 0;
     d.modelScale = scale;
-    d.distanceCm = -head.origin.z;
-    d.calibrated = head.calibrated;
-    const outerL = lm[LM.leftEyeOuter];
-    const outerR = lm[LM.rightEyeOuter];
-    if (outerL && outerR) {
-      // Outer-corner distance at the bridge's depth, in the same centimetres.
-      const halfHeightWorld = d.distanceCm * Math.tan(MathUtils.DEG2RAD * this.camera.fov * 0.5);
-      const viewportWidthWorld = halfHeightWorld * this.camera.aspect * 2;
-      d.ipdCm = Math.hypot((outerR.x - outerL.x) * viewportWidthWorld, (outerR.y - outerL.y) * viewportWidthWorld / this.camera.aspect);
+    d.distanceCm = -h.origin.z;
+    d.calibrated = h.state === "calibrated";
+    d.calibrationState = h.state;
+    d.calibrationConfidence = h.confidence;
+    d.calibrationBasis = h.basis;
+    d.frameReliable = h.frameReliable;
+    d.quality = h.measurement.quality;
+    d.landmarkQuality = h.measurement.landmarkQuality;
+    d.visibilityMin = h.measurement.visibilityMin;
+    d.matrixScale = h.matrixScale;
+    d.occluderFit = this.occluder.lateralFit;
+    d.headMesh = h.headLandmarks;
+    d.headMeshCount = h.landmarkCount;
+    if (templeL && eyeL && eyeR && lm[LM.leftEyeOuter] && lm[LM.rightEyeOuter]) {
+      const aspect = this.camera.aspect;
+      const outer = Math.hypot(
+        (lm[LM.rightEyeOuter].x - lm[LM.leftEyeOuter].x) * aspect,
+        lm[LM.rightEyeOuter].y - lm[LM.leftEyeOuter].y
+      );
+      d.anchorToEyes = outer > 0 ? Math.hypot((d.anchor.u - d.eyeCentre.u) * aspect, d.anchor.v - d.eyeCentre.v) / outer : 0;
     }
-    d.position[0] = head.anchor.x;
-    d.position[1] = head.anchor.y;
-    d.position[2] = head.anchor.z;
-    this.scratchEuler.setFromQuaternion(head.quaternion, "YXZ");
+    for (const i of DEBUG_HEAD_POINTS) {
+      if (i >= h.landmarkCount) continue;
+      const slot = d.headPoints[i] ?? (d.headPoints[i] = [0, 0, 0]);
+      slot[0] = h.headLandmarks[i * 3];
+      slot[1] = h.headLandmarks[i * 3 + 1];
+      slot[2] = h.headLandmarks[i * 3 + 2];
+    }
+    d.position[0] = h.anchor.x;
+    d.position[1] = h.anchor.y;
+    d.position[2] = h.anchor.z;
+    this.scratchEuler.setFromQuaternion(h.quaternion, "YXZ");
     d.rotationDeg[0] = MathUtils.RAD2DEG * this.scratchEuler.x;
     d.rotationDeg[1] = MathUtils.RAD2DEG * this.scratchEuler.y;
     d.rotationDeg[2] = MathUtils.RAD2DEG * this.scratchEuler.z;
@@ -401,8 +454,7 @@ export class TryOnScene {
 
   dispose() {
     this.setModel(null);
-    this.mask.geometry.dispose();
-    (this.mask.material as MeshBasicMaterial).dispose();
+    this.occluder.dispose();
     this.environment?.dispose();
     this.renderer.dispose();
   }

@@ -13,19 +13,18 @@ import {
   computeFacePose,
   FacePoseSmoother,
   PitchCalibrator,
-  type FacePose,
   type NormalizedPoint,
 } from "@/lib/faceGeometry";
 import {
   computeCoverTransform,
   computeOverlayPlacement,
-  DEFAULT_OVERLAY_GEOMETRY,
   selectSideOverlay,
   type OverlayPlacement,
   type SideOverlaySelection,
 } from "@/lib/overlayPlacement";
 import type { GlassesOverlay3DHandle, OverlayRect } from "@/components/try-on/GlassesOverlay3D";
 import { isTryOnDebugEnabled, TryOnDebugOverlay } from "@/components/try-on/TryOnDebugOverlay";
+import { TryOnDebugPanel } from "@/components/try-on/TryOnDebugPanel";
 // Type-only, so this never pulls Three.js into this module's bundle.
 import type { MediapipeMatrix } from "@/lib/threeTryOn/faceMatrix";
 import { loadImage } from "@/lib/loadImage";
@@ -59,10 +58,12 @@ type FaceState = "searching" | "tracking" | "multiple";
  * Only treat tracking as truly lost after it's been missing this long.
  */
 const NO_FACE_GRACE_MS = 400;
-
-/** Lens-centre span as a fraction of the generated frame artwork's width. */
-const DEFAULT_LENS_SPAN_FRAC =
-  DEFAULT_OVERLAY_GEOMETRY.lensRightX - DEFAULT_OVERLAY_GEOMETRY.lensLeftX;
+/**
+ * The fit is only provisional while the person has not yet been seen facing
+ * the camera (see `HeadFrameTracker`). A normal start is provisional for a
+ * fraction of a second, so the hint only appears if it lasts.
+ */
+const FRONTAL_HINT_DELAY_MS = 1200;
 
 /**
  * How many tracked frames may arrive without a head-pose matrix before 3D
@@ -125,6 +126,9 @@ export function VirtualTryOnModal() {
 
   const overlay3dRef = useRef<GlassesOverlay3DHandle>(null);
   const missingMatrixCountRef = useRef(0);
+  /** When the fit became provisional, for `FRONTAL_HINT_DELAY_MS`; null while calibrated or lost. */
+  const provisionalSinceRef = useRef<number | null>(null);
+  const [needsFrontal, setNeedsFrontal] = useState(false);
 
   const [permission, setPermission] = useState<PermissionState>("idle");
   const [faceState, setFaceState] = useState<FaceState>("searching");
@@ -142,7 +146,7 @@ export function VirtualTryOnModal() {
    * modal opens (not at render, which also runs on the server), and only
    * then — flipping it mid-session isn't a use case.
    */
-  const debugFit = useMemo(() => (isOpen ? isTryOnDebugEnabled() : false), [isOpen]);
+  const debugFit = useMemo(() => (isOpen ? isTryOnDebugEnabled() : 0), [isOpen]);
 
   // A product with a real 3D model is best shown in 3D; a flat photo still
   // looks more like itself as a 2D cutout than as a generic placeholder mesh.
@@ -256,16 +260,16 @@ export function VirtualTryOnModal() {
   }, [isOpen, requestCamera]);
 
   /**
-   * Feeds one tracked frame to the 3D overlay. Position and size come from
-   * the landmark-derived pose (so all of the 2D path's tuning still applies),
-   * while rotation and depth come from MediaPipe's head-pose matrix.
+   * Feeds one tracked frame to the 3D overlay. Rotation, depth, position and
+   * size all come from MediaPipe's head-pose matrix and the landmarks, lifted
+   * into 3D head space inside the scene — the 2D pose heuristics are not used.
+   * The product's own `scale`/offsets go in separately, so they are never
+   * baked into the person's calibration.
    */
   const updateThreeOverlay = useCallback(
     (
-      pose: FacePose,
       landmarks: NormalizedPoint[],
       tryOn: TryOnConfig,
-      video: HTMLVideoElement,
       matrixData: MediapipeMatrix | undefined,
       timestampMs: number
     ) => {
@@ -274,14 +278,6 @@ export function VirtualTryOnModal() {
             matrixData,
             timestampMs,
             landmarks,
-            anchorU: pose.anchorX / video.videoWidth,
-            anchorV: pose.anchorY / video.videoHeight,
-            // `projectedWidth`, not `width`: the scene undoes the
-            // foreshortening itself, from the rotation it is about to render.
-            // The person's measurement only — the product's `scale` goes in
-            // separately, so it isn't baked into the calibration.
-            projectedLensSpanFrac: (pose.projectedWidth * DEFAULT_LENS_SPAN_FRAC) / video.videoWidth,
-            faceWidthFrac: pose.templeWidth / video.videoWidth,
             scale: tryOn.scale,
             offsetX: tryOn.offsetX,
             offsetY: tryOn.offsetY,
@@ -298,6 +294,17 @@ export function VirtualTryOnModal() {
         setChosenMode("2d");
       } else if (placed) {
         missingMatrixCountRef.current = 0;
+      }
+
+      // Never let a provisional fit pass as a finished one: while the person
+      // has only been seen turned, say so and ask them to face the camera.
+      const fit = placed ? overlay3dRef.current?.fit() : null;
+      if (fit && fit.state !== "calibrated") {
+        provisionalSinceRef.current ??= timestampMs;
+        setNeedsFrontal(timestampMs - provisionalSinceRef.current >= FRONTAL_HINT_DELAY_MS);
+      } else {
+        provisionalSinceRef.current = null;
+        setNeedsFrontal(false);
       }
     },
     []
@@ -337,6 +344,7 @@ export function VirtualTryOnModal() {
           if (lastSeen === null || now - lastSeen >= NO_FACE_GRACE_MS) {
             // Genuinely lost, not just a dropped frame — clear and reset.
             setFaceState("searching");
+            provisionalSinceRef.current = null;
             smootherRef.current.next(null, now);
             setPlacement(null);
             setSideOverlay(null);
@@ -357,10 +365,8 @@ export function VirtualTryOnModal() {
           if (pose && currentProduct && size.width && size.height) {
             if (modeRef.current) {
               updateThreeOverlay(
-                pose,
                 faces[0],
                 currentProduct.tryOn,
-                video,
                 result?.facialTransformationMatrixes?.[0],
                 now
               );
@@ -509,7 +515,7 @@ export function VirtualTryOnModal() {
                     // the 3D render and the face it sits on stay in step.
                     <>
                       <GlassesOverlay3D ref={overlay3dRef} product={product} rect={overlayRect} debug={debugFit} />
-                      {debugFit && <TryOnDebugOverlay rect={overlayRect} getInfo={readDebugInfo} />}
+                      {debugFit > 0 && <TryOnDebugOverlay rect={overlayRect} getInfo={readDebugInfo} />}
                     </>
                   ) : (
                     <GlassesOverlay
@@ -521,10 +527,21 @@ export function VirtualTryOnModal() {
                   )}
                 </div>
 
+                {/* Development readout (?tryOnDebug=1): not mirrored, so it reads normally. */}
+                {is3d && debugFit > 0 && <TryOnDebugPanel getInfo={readDebugInfo} />}
+
                 {threeUnavailable && (
                   <div className="pointer-events-none absolute inset-x-0 bottom-4 flex justify-center px-6">
                     <p className="glass-dark rounded-full px-4 py-2 text-center text-xs font-semibold text-white">
                       تعذّر تشغيل العرض ثلاثي الأبعاد على هذا الجهاز، تم الرجوع للعرض العادي
+                    </p>
+                  </div>
+                )}
+
+                {permission === "granted" && is3d && faceState === "tracking" && needsFrontal && (
+                  <div className="pointer-events-none absolute inset-x-0 top-4 flex justify-center px-6">
+                    <p className="glass-dark rounded-full px-4 py-2 text-center text-xs font-semibold text-white">
+                      انظر إلى الكاميرا مباشرة لضبط مقاس النظارة
                     </p>
                   </div>
                 )}
